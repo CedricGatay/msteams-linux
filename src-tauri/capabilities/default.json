@@ -6,8 +6,7 @@
   "permissions": [
     "core:default",
     "notification:default",
-    "allow-set-unread-count",
-    "allow-show-notification"
+    "allow-set-unread-count"
   ],
   "remote": {
     "urls": [

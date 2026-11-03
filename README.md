@@ -21,14 +21,17 @@ hands external links off to your browser — without bundling the official
   control proxy `https://tenant-proxy.example.net` also stays
   in-app. Only those exact HTTPS hosts are allowed, not other `example.com` hosts
   or other tenants under `access.mcas.ms`. Session-control policies still apply.
-- **Media & notifications** — camera, microphone, screen-share, media keys and
-  notification permissions are granted automatically so notifications work and
-  the call UI can request devices.
+- **Media permissions** — WebView camera, microphone, screen-share and media-key
+  requests are allowed so the call UI can request devices. macOS still controls
+  the OS-level camera/microphone permissions; native notification authorization
+  is requested separately.
 
   > Calls/messages only actually connect on Linux where the system WebKitGTK was
   > built with WebRTC. See [Calls / WebRTC on Linux](#calls--webrtc-on-linux).
-- **Native notifications** — Teams' web notifications are bridged to desktop
-  notifications through `tauri-plugin-notification`.
+- **Native notifications** — Teams' page notifications are bridged to macOS
+  Notification Center through `UNUserNotificationCenter`, under the real app
+  identity. Clicking a notification brings Teams forward. Other platforms retain
+  their existing notification plugin.
 - **Tray icon with unread badge** — closing the window hides the app to the
   system tray, whose icon shows a red badge with the unread message count
   (driven by Teams' web notifications and the unread counter it puts in
@@ -81,7 +84,7 @@ The fix has three parts:
 ```
 .
 ├── .github/workflows/release.yml  # CI: checks + AppImage -> GitHub release
-├── dist/                     # minimal placeholder page (bundled, unused at runtime)
+├── dist/                     # bundled placeholder + native session-restore loading page
 ├── package.json              # Tauri CLI scripts
 ├── package-lock.json         # pinned npm deps (required by CI's `npm ci`)
 ├── scripts/
@@ -162,6 +165,102 @@ With `MSTEAMS_DEBUG=1`, the app logs a read-only media capability probe when
 Teams loads. It does not activate the microphone or camera. API availability
 alone does not verify end-to-end calling or organization policy compatibility.
 
+## Native notifications on macOS
+
+On the first Teams page load the shell checks native notification permission and
+asks macOS for authorization if it has not been decided. Teams' `Notification`
+permission reflects the actual native grant or denial, rather than being forced
+to `granted`. This implementation requires macOS 11 or newer.
+
+Build the signed `.app` and launch through Finder or `./scripts/run-macos.sh`,
+not the raw `Contents/MacOS` executable. Local builds use ad-hoc signing with the
+bundle identifier and `Info.plist` bound into the signature; distribution still
+requires the appropriate Developer ID/notarization. The launcher checks the
+signature and uses Launch Services. Raw/unbundled development runs cannot use
+the native notification backend and report an actionable error instead.
+
+Right-click the tray icon and select **Send test notification** to test without
+waiting for a Teams message. Click its banner to bring Teams forward. If no banner
+appears, check **System Settings → Notifications → Microsoft Teams**, the selected
+alert style, and Focus/Do Not Disturb. macOS can accept a notification while hiding
+its banner according to those settings. If the test is rejected, a native dialog
+shows the error domain/code without exposing notification contents.
+
+Teams' own settings preview uses its in-app toast command, and its separate
+browser path can deliberately skip delivery while focused. See the
+[source investigation and guarded service-level adapter](docs/teams-notification-integration.md)
+for the exact gates; the settings preview alone does not validate native delivery.
+
+The bridge handles `new Notification(...)` and page-side
+`ServiceWorkerRegistration.showNotification(...)`, supports tag replacement,
+silent notifications, close, and page notification click handlers. It preserves
+the unread tray badge and reports delivery errors without logging message content.
+Notification IPC is restricted to the main Teams origins, not authentication
+pages or popups.
+
+Keep the app running (closing the window hides it to the tray). Worker globals
+cannot be injected by this shell: worker-only push and notifications after the
+app has fully quit are not implemented. Clicking worker-registration notifications
+brings the app forward; this does not synthesize worker `notificationclick` events.
+Message titles/bodies go to the native Notification Center, subject to macOS
+preview/privacy settings, but are not stored in shell diagnostic logs.
+
+### Optional native notifications while Teams is focused
+
+Enable the tray checkbox **Also show native notifications while focused
+(experimental)** to bridge approved browser candidates that Teams otherwise
+skips only because the app has focus. It is **off by default**. The boolean is
+saved in `native-foreground-notifications.json` under the app data directory;
+changes apply live and are reloaded on page navigation. For a one-run trial,
+launch with `MSTEAMS_NATIVE_FOREGROUND=1 ./scripts/run-macos.sh` after a clean Quit.
+
+This adapter uses guarded, bounded lookup of known React provider service
+references, not message stores or rendered toast text. It calls Teams' original
+notification handler first. Already-queued notifications, denied permissions,
+disabled out-of-tab settings and unknown results remain unchanged. Prepared
+preview text and activation are preserved; candidates are deduplicated without
+comparing private message text. For this foreground path only, Teams' automatic
+in-app `close()` is acknowledged once without cancelling a submitted native
+notification: macOS owns its presentation/dismissal, and up to 256 callbacks
+remain available for activation. Closing before submission and adapter-error
+rollback still cancel native delivery. Standard browser notifications retain
+their normal close behavior. Native failures fall
+back to Teams' original in-app behavior.
+
+Because this uses an internal Teams service, compatibility is experimental. If
+the service cannot be identified safely, nothing is forced or spoofed and the
+standard browser bridge continues working. In trace mode `teams_adapter` reports
+discovery, skipped-focus and mirrored counts. Settings previews that never enter
+the approved browser-candidate path are not indiscriminately converted into OS
+notifications. See [integration details](docs/teams-notification-integration.md).
+
+### Trace a Teams notification
+
+After a clean ⌘Q and building the signed bundle, start a temporary metadata trace:
+
+```bash
+MSTEAMS_NOTIFICATION_TRACE=1 MSTEAMS_LOG_FILE=/tmp/teams-notification-trace.log ./scripts/run-macos.sh
+```
+
+Trace records are prefixed `[msteams-notification-trace]`. They record API counts,
+permission reads/requests and their values, IPC receipt, macOS acceptance and
+foreground presentation, document focus/visibility, and whether the page replaced
+the installed hooks. A bounded 64-event history preserves timing between polls.
+Worker control and iframe counts identify possible paths outside the top-page
+hook; they do not trace worker/iframe globals themselves.
+
+In trace mode the tray also offers **Send web-bridge test notification**, which
+calls the page's actual `Notification` API. Compare that with Teams Settings →
+Notifications → Send test notification while focused, then a real incoming message
+while the shell is hidden. The original **Send test notification** exercises only
+the native backend, bypassing page IPC.
+
+Button activity and ARIA alert/status mutation counts are only in-app UI
+heuristics, not proof that an OS notification was requested. No DOM text, button
+labels, titles, message bodies, tags, message IDs, worker URLs, or storage values
+are traced. Rust accepts only fixed enums, booleans and counters, never raw eval
+output. Tracing is disabled by default; quit and launch without the flag to stop.
+
 ## Optional session restoration on macOS
 
 WebKit drops session-only cookies when the app exits. To retain those across a
@@ -180,9 +279,14 @@ normally. No browser cookies or accounts are imported.
   and consumed on use. A fresh snapshot is captured on the next clean Quit.
   This is session restoration, not permanent token storage; server expiry,
   sign-out and revocation still apply. It does not restore tab `sessionStorage`.
-- Startup falls back to normal sign-in after at most four seconds of restoration
-  work; Quit waits at most five seconds for capture. Locked/denied Keychain access
-  or a forced process termination may mean signing in again. The macOS application
+- Startup shows **Restoring your Teams session** while waiting for Keychain,
+  allowing up to two minutes for approval instead of racing a short deadline.
+  **Continue without restoring** opens normal sign-in immediately. Keychain reads
+  that finish after cancellation/fallback are ignored without consuming the unused
+  snapshot or starting a late cookie replay. Quitting while still waiting also
+  preserves the snapshot. No JavaScript
+  callback gates restoration. Quit waits at most five seconds for capture.
+  Denied access or forced termination may still require sign-in. The macOS application
   menu's custom ⌘Q action is routed through capture; native Dock Quit and system
   termination can bypass it, so use the tray or application menu for restoration.
 - **Disable session restore and forget saved session** stops restoration and
@@ -359,16 +463,17 @@ Almost everything lives in `src-tauri/src/lib.rs`:
   [Why the "third-party cookies" error page used to appear](#why-the-third-party-cookies-error-page-used-to-appear)).
 - `close_popups` — drops the leftover `auth-*` windows after sign-in.
 - `permission_response` — which permissions are auto-granted.
-- `INJECT_JS` — script injected into the Teams pages: it hooks the web
-  `Notification` API, watches `document.title` for the `(N)` unread counter and
-  forwards both to the `set_unread_count` / `show_notification` commands.
+- `INJECT_JS` — on macOS loads `src-tauri/src/notification-bridge.js`, which
+  bridges the page notification APIs, watches the title unread count and keeps
+  native permission/delivery state. `src-tauri/src/native_notifications.rs`
+  implements authorization, delivery, foreground presentation and click handling.
 - `render_badge` — composites the red unread badge onto the tray icon.
 - The tray, its menu and the hide-to-tray close behaviour are set up in `run()`.
 
-The `set_unread_count` / `show_notification` commands are app commands: they are
-declared in `src-tauri/build.rs` (which generates their `allow-*` permissions)
-and granted by `src-tauri/capabilities/default.json`, together with the
-Microsoft origins the app is allowed to talk to.
+The app commands are declared in `src-tauri/build.rs`, which generates their
+`allow-*` permissions. Notification delivery, permission and close commands are
+scoped to the main Teams origins by `src-tauri/capabilities/notification-bridge.json`;
+unread-count updates retain the default capability.
 
 App metadata (name, identifier, icons, bundle targets) is in
 `src-tauri/tauri.conf.json`.

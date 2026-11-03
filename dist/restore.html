@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Restoring Teams sign-in</title>
+  <style>
+    :root { color-scheme: dark light; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font: 16px system-ui, -apple-system, sans-serif; background: #1f1f1f; color: #eee; }
+    main { max-width: 32rem; padding: 2rem; text-align: center; }
+    p { line-height: 1.6; color: #ccc; }
+    a { display: inline-block; margin-top: 1rem; padding: .8rem 1rem;
+      border-radius: .6rem; background: #6264a7; color: white; text-decoration: none; }
+    a:focus-visible { outline: 3px solid white; outline-offset: 4px; }
+    small { display: block; margin-top: 1.5rem; color: #aaa; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Restoring your Teams session…</h1>
+    <p role="status">If macOS asks for Keychain access, approve the request to restore your saved sign-in.
+      This can take longer after an app update.</p>
+    <p>Teams will open automatically when restoration finishes.</p>
+    <a href="tauri://localhost/session-restore-continue">Continue without restoring</a>
+    <small>Continuing without restoration may require signing in again.
+      The wait is limited to two minutes.</small>
+  </main>
+</body>
+</html>

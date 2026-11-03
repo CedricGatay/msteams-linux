@@ -8,17 +8,25 @@
 //!   application window,
 //! * in-app authentication popups (login.microsoftonline.com, ...) are opened in
 //!   their own window so the OAuth flow completes inside the app,
-//! * camera / microphone / notification permissions are granted automatically so
-//!   calls and notifications work,
+//! * camera / microphone WebView requests are allowed, with OS-level permissions
+//!   controlled by macOS; native notification authorization is requested separately,
 //! * the WebView data directory is persisted so the user stays signed in,
 //! * Teams' web notifications are bridged to native desktop notifications and
 //!   drive a red unread-count badge on the system tray icon,
 //! * closing the window hides the app to the tray instead of quitting.
 
+#[cfg(target_os = "macos")]
+mod foreground_notifications;
+#[cfg(target_os = "macos")]
+mod native_notifications;
+#[cfg(target_os = "macos")]
+mod notification_trace;
 mod session_diagnostics;
 #[cfg(target_os = "macos")]
 mod session_restore;
 
+#[cfg(target_os = "macos")]
+use foreground_notifications::ForegroundNotifications;
 use session_diagnostics::snapshot;
 #[cfg(target_os = "macos")]
 use session_restore::SessionRestore;
@@ -32,6 +40,7 @@ use tauri::{
     webview::{NewWindowResponse, PermissionKind, PermissionResponse},
     AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 /// Entry point of the Teams web client.
@@ -91,6 +100,7 @@ const TRUSTED_HOSTS: &[&str] = &[
 
 /// Counter used to give every popup window a unique label.
 static WINDOW_SEQ: AtomicU64 = AtomicU64::new(1);
+static NOTIFICATION_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 enum WindowKind {
@@ -156,8 +166,9 @@ fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
     });
 }
 
-/// Camera, microphone and notifications must be granted for Teams calls and
-/// notifications to work. Everything else keeps the browser default.
+/// Allow WebView requests needed for Teams. These responses do not grant macOS
+/// camera/microphone or native notification authorization. Other requests keep
+/// the browser default.
 fn permission_response(kind: PermissionKind) -> PermissionResponse {
     if std::env::var_os("MSTEAMS_DEBUG").is_some() {
         let capture = match kind {
@@ -347,20 +358,27 @@ fn create_window<R: Runtime>(
     let popup_app = app.clone();
     let popup_dir = data_dir.clone();
 
-    // The window is built on `about:blank` and navigated to Teams afterwards,
-    // so that the WebKitGTK tweaks below (third-party cookies above all) are in
+    // Linux and popups start on about:blank; macOS session restore uses a local
+    // loading page. Teams navigation starts only once native preparation is in
     // place *before* the first request goes out. Teams runs its third-party
     // cookie probe right at start-up and treats a blocked probe as "this
     // browser is broken".
     let blank = Url::parse("about:blank").expect("about:blank is a valid URL");
-    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(blank))
+    let initial_url = WebviewUrl::External(blank);
+    #[cfg(target_os = "macos")]
+    let initial_url = if matches!(kind, WindowKind::Main) && app.state::<SessionRestore>().enabled()
+    {
+        WebviewUrl::App(session_restore::RESTORE_PAGE.into())
+    } else {
+        initial_url
+    };
+    let builder = WebviewWindowBuilder::new(app, label, initial_url)
         .title("Microsoft Teams")
         // Set at the WebView level before navigation, for both HTTP requests
         // and navigator.userAgent, including in authentication popups.
         .user_agent(BROWSER_USER_AGENT)
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
-        .initialization_script(INJECT_JS)
         .on_page_load(|window, payload| {
             log_navigation("page-load", payload.url());
             if std::env::var_os("MSTEAMS_DEBUG").is_some()
@@ -388,9 +406,17 @@ fn create_window<R: Runtime>(
     #[cfg(target_os = "macos")]
     let builder = builder.data_store_identifier(WEBKIT_PROFILE_ID);
 
-    // Only the main Teams window requests capture access on startup. Auth
-    // popups must never activate camera/microphone permission requests.
+    // Notification/capture hooks belong only to the main window, not auth popups.
     let builder = if matches!(kind, WindowKind::Main) {
+        #[cfg(target_os = "macos")]
+        let builder = if notification_trace::enabled() {
+            builder.initialization_script("window.__msteamsNotificationTraceEnabled = true;")
+        } else {
+            builder
+        };
+        let builder = builder.initialization_script(INJECT_JS);
+        #[cfg(target_os = "macos")]
+        let builder = builder.initialization_script(include_str!("teams-foreground-adapter.js"));
         builder.initialization_script(include_str!("media-permissions.js"))
     } else {
         builder
@@ -402,6 +428,17 @@ fn create_window<R: Runtime>(
     #[cfg(not(target_os = "linux"))]
     let builder = builder.on_navigation(move |url| {
         log_navigation("navigation", url);
+        #[cfg(target_os = "macos")]
+        if SessionRestore::is_continue_url(url) {
+            if matches!(kind, WindowKind::Main) {
+                let state = nav_app.state::<SessionRestore>().inner().clone();
+                // Leave WebKit's navigation-policy callback before navigating.
+                std::thread::spawn(move || {
+                    state.continue_without_restoring();
+                });
+            }
+            return false;
+        }
         if is_trusted(url) {
             true
         } else {
@@ -448,7 +485,8 @@ fn create_window<R: Runtime>(
     }
 
     // Never gate navigation on a JavaScript callback. Opt-in macOS restore uses
-    // native APIs on a worker, with a watchdog that loads Teams after four seconds.
+    // native APIs on a worker. A local loading page allows Keychain approval or
+    // an explicit skip, with a bounded two-minute fallback.
     #[cfg(target_os = "macos")]
     if matches!(kind, WindowKind::Main) {
         app.state::<SessionRestore>().navigate(&window, url);
@@ -507,6 +545,10 @@ const MEDIA_DIAGNOSTICS_JS: &str = r#"
 /// which is the most reliable in-app signal, and (2) the unread counter Teams
 /// puts in `document.title` (e.g. `(3) Microsoft Teams...`). Whichever is
 /// higher wins, and the counter resets when the user looks at the window.
+#[cfg(target_os = "macos")]
+const INJECT_JS: &str = include_str!("notification-bridge.js");
+
+#[cfg(not(target_os = "macos"))]
 const INJECT_JS: &str = r#"
 (function () {
   if (window.__msteamsHooked) return;
@@ -724,26 +766,210 @@ fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32
 
 /// Called from the injected script to show a native notification for a web
 /// notification fired by Teams.
+fn is_notification_origin(url: &Url) -> bool {
+    url.scheme() == "https"
+        && matches!(
+            url.host_str(),
+            Some("teams.cloud.microsoft" | "teams.microsoft.com")
+        )
+}
+
+fn require_notification_window(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" && window.url().is_ok_and(|url| is_notification_origin(&url)) {
+        Ok(())
+    } else {
+        Err("Notification access is limited to the main Teams page".into())
+    }
+}
+
+fn notification_payload(
+    title: String,
+    body: String,
+    id: Option<String>,
+) -> Result<(String, String, String), String> {
+    let id =
+        id.unwrap_or_else(|| format!("shell-{}", NOTIFICATION_SEQ.fetch_add(1, Ordering::Relaxed)));
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        return Err("Invalid notification identifier".into());
+    }
+    let title = if title.trim().is_empty() {
+        "Microsoft Teams".to_owned()
+    } else {
+        title.chars().take(512).collect()
+    };
+    Ok((id, title, body.chars().take(4096).collect()))
+}
+
 #[tauri::command]
-fn show_notification(app: AppHandle, title: String, body: String) {
-    let _ = app.notification().builder().title(title).body(body).show();
+fn foreground_notifications_enabled(app: AppHandle, window: WebviewWindow) -> Result<bool, String> {
+    require_notification_window(&window)?;
+    #[cfg(target_os = "macos")]
+    {
+        Ok(app.state::<ForegroundNotifications>().enabled())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+async fn notification_permission(
+    app: AppHandle,
+    window: WebviewWindow,
+    request: bool,
+) -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    notification_trace::event(if request {
+        "ipc_permission_request"
+    } else {
+        "ipc_permission_query"
+    });
+    require_notification_window(&window)?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.state::<native_notifications::NativeNotifications>();
+        tauri::async_runtime::spawn_blocking(move || {
+            native_notifications::permission(request).map(str::to_owned)
+        })
+        .await
+        .map_err(|_| "Notification permission operation failed".to_owned())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri::plugin::PermissionState;
+        let state = if request {
+            app.notification().request_permission()
+        } else {
+            app.notification().permission_state()
+        }
+        .map_err(|_| "Notification permission operation failed".to_owned())?;
+        Ok(match state {
+            PermissionState::Granted => "granted",
+            PermissionState::Denied => "denied",
+            _ => "default",
+        }
+        .into())
+    }
+}
+
+#[tauri::command]
+async fn show_notification(
+    app: AppHandle,
+    window: WebviewWindow,
+    title: String,
+    body: String,
+    id: Option<String>,
+    silent: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    notification_trace::event("ipc_show_received");
+    require_notification_window(&window).inspect_err(|_| {
+        #[cfg(target_os = "macos")]
+        notification_trace::event("ipc_origin_rejected");
+    })?;
+    let (id, title, body) = notification_payload(title, body, id).inspect_err(|_| {
+        #[cfg(target_os = "macos")]
+        notification_trace::event("ipc_payload_rejected");
+    })?;
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app.state::<native_notifications::NativeNotifications>();
+        tauri::async_runtime::spawn_blocking(move || {
+            native_notifications::show(&id, &title, &body, silent.unwrap_or(false))
+        })
+        .await
+        .map_err(|_| "Notification delivery operation failed".to_owned())?
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (id, silent);
+        app.notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .show()
+            .map_err(|_| "Notification delivery operation failed".into())
+    }
+}
+
+#[tauri::command]
+async fn close_notification(window: WebviewWindow, id: String) -> Result<(), String> {
+    require_notification_window(&window)?;
+    let (id, _, _) = notification_payload(String::new(), String::new(), Some(id))?;
+    #[cfg(target_os = "macos")]
+    tauri::async_runtime::spawn_blocking(move || native_notifications::close(&id))
+        .await
+        .map_err(|_| "Notification close operation failed".to_owned())?;
+    #[cfg(not(target_os = "macos"))]
+    let _ = id;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn send_test_notification(app: &AppHandle) {
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let result = native_notifications::permission(true).and_then(|permission| {
+            if permission != "granted" {
+                return Err("Notifications are disabled. Enable Microsoft Teams in System Settings → Notifications.".into());
+            }
+            let id = format!("test-{}", NOTIFICATION_SEQ.fetch_add(1, Ordering::Relaxed));
+            native_notifications::show(&id, "Microsoft Teams", "Native notification bridge is working. Click to open Teams.", false)
+        });
+        match result {
+            Ok(()) => eprintln!("[msteams] test notification accepted: true"),
+            Err(error) => {
+                eprintln!("[msteams] test notification failed: {error}");
+                let ui_handle = handle.clone();
+                let _ = handle.run_on_main_thread(move || {
+                    show_main(&ui_handle);
+                    native_notifications::show_test_error(&error);
+                });
+            }
+        }
+    });
 }
 
 /// Application entry point shared by the desktop binary and (potentially)
 /// mobile targets.
 pub fn run() {
-    let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    let app = builder
         .invoke_handler(tauri::generate_handler![
             set_unread_count,
-            show_notification
+            show_notification,
+            notification_permission,
+            close_notification,
+            foreground_notifications_enabled
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir).ok();
 
             app.manage(Unread(AtomicU32::new(0)));
+            #[cfg(target_os = "macos")]
+            app.manage(ForegroundNotifications::new(data_dir.clone()));
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                app.manage(native_notifications::NativeNotifications::new(move |id| {
+                    show_main(&handle);
+                    if let Some(window) = handle.get_webview_window("main") {
+                        if let Ok(id) = serde_json::to_string(&id) {
+                            let _ = window.eval(format!("if (window.__msteamsNotificationClick) window.__msteamsNotificationClick({id});"));
+                        }
+                    }
+                }));
+            }
             #[cfg(target_os = "macos")]
             app.manage(SessionRestore::new(data_dir.clone(), WEBKIT_PROFILE_ID));
             #[cfg(target_os = "macos")]
@@ -760,6 +986,9 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let notification_i = MenuItem::with_id(
+                app, "test-notification", "Send test notification", true, None::<&str>,
+            )?;
             let session_i = MenuItem::with_id(
                 app,
                 "session-diagnostics",
@@ -771,8 +1000,14 @@ pub fn run() {
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(
                 app,
-                &[&show_i, &hide_i, &media_i, &session_i, &separator, &quit_i],
+                &[&show_i, &hide_i, &media_i, &notification_i, &session_i, &separator, &quit_i],
             )?;
+
+            #[cfg(target_os = "macos")]
+            if notification_trace::enabled() {
+                let web_test = MenuItem::with_id(app, "test-web-notification", "Send web-bridge test notification", true, None::<&str>)?;
+                menu.insert(&web_test, 4)?;
+            }
 
             #[cfg(target_os = "macos")]
             let restore_i = {
@@ -792,6 +1027,16 @@ pub fn run() {
                     None::<&str>,
                 )?;
                 menu.insert_items(&[&item, &forget], 4)?;
+                item
+            };
+
+            #[cfg(target_os = "macos")]
+            let foreground_i = {
+                let item = tauri::menu::CheckMenuItem::with_id(
+                    app, "foreground-native", "Also show native notifications while focused (experimental)",
+                    true, app.state::<ForegroundNotifications>().enabled(), None::<&str>,
+                )?;
+                menu.insert(&item, 4)?;
                 item
             };
 
@@ -817,9 +1062,39 @@ pub fn run() {
                             );
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    "test-web-notification" => {
+                        notification_trace::event("web_test_requested");
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.url().is_ok_and(|url| is_notification_origin(&url)) {
+                                let _ = window.eval_with_callback(
+                                    "(function () { try { new window.Notification('Teams web-bridge test', {body: 'Synthetic page notification through the same bridge as Teams.', silent: false}); return true; } catch (_) { return false; } })();",
+                                    |raw| notification_trace::event(if serde_json::from_str::<bool>(&raw).unwrap_or(false) { "web_test_constructed" } else { "web_test_constructor_failed" }),
+                                );
+                            } else { notification_trace::event("web_test_not_on_teams"); }
+                        }
+                    }
+                    "test-notification" => {
+                        #[cfg(target_os = "macos")]
+                        send_test_notification(app);
+                        #[cfg(not(target_os = "macos"))]
+                        let _ = app.notification().builder().title("Microsoft Teams")
+                            .body("Native notification bridge is working.").show();
+                    }
                     "session-diagnostics" => {
                         if let Some(window) = app.get_webview_window("main") {
                             snapshot(&window, "manual");
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    "foreground-native" => {
+                        let state = app.state::<ForegroundNotifications>();
+                        let enabled = foreground_i.is_checked().unwrap_or(false);
+                        if state.set_enabled(enabled).is_err() {
+                            let _ = foreground_i.set_checked(state.enabled());
+                            eprintln!("[msteams] could not save foreground notification preference");
+                        } else if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.eval(format!("if (window.__msteamsForegroundAdapter) window.__msteamsForegroundAdapter.setEnabled({enabled});"));
                         }
                     }
                     #[cfg(target_os = "macos")]
@@ -859,6 +1134,13 @@ pub fn run() {
 
             let url = Url::parse(TEAMS_URL).expect("TEAMS_URL is a valid URL");
             let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+
+            #[cfg(target_os = "macos")]
+            if std::env::var("MSTEAMS_TEST_NOTIFICATION").as_deref() == Ok("1") {
+                send_test_notification(app.handle());
+            }
+            #[cfg(target_os = "macos")]
+            notification_trace::start(app.handle());
 
             // Teams closes its sign-in popups from JavaScript, which only
             // destroys their web view; drop the leftover windows once the user is
@@ -905,6 +1187,40 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn notification_bridge_accepts_only_exact_https_teams_origins() {
+        assert!(is_notification_origin(&url(
+            "https://teams.cloud.microsoft/v2/"
+        )));
+        assert!(is_notification_origin(&url(
+            "https://teams.microsoft.com/v2/"
+        )));
+        for target in [
+            "https://login.microsoftonline.com/",
+            "https://teams.cloud.microsoft.evil.com/",
+            "http://teams.cloud.microsoft/",
+        ] {
+            assert!(!is_notification_origin(&url(target)));
+        }
+    }
+
+    #[test]
+    fn notification_payload_is_bounded_without_breaking_unicode() {
+        let (_, title, body) = notification_payload(
+            "😀".repeat(600),
+            "é".repeat(5000),
+            Some("page-test-1".into()),
+        )
+        .unwrap();
+        assert_eq!(title.chars().count(), 512);
+        assert_eq!(body.chars().count(), 4096);
+        let (_, fallback, _) = notification_payload("  ".into(), String::new(), None).unwrap();
+        assert_eq!(fallback, "Microsoft Teams");
+        for id in ["", "bad/id", "not-an-id\n"] {
+            assert!(notification_payload(String::new(), String::new(), Some(id.into())).is_err());
+        }
     }
 
     #[test]

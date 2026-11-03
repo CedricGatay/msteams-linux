@@ -1,6 +1,12 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
-        tauri_build::AppManifest::new().commands(&["set_unread_count", "show_notification"]),
+        tauri_build::AppManifest::new().commands(&[
+            "set_unread_count",
+            "show_notification",
+            "notification_permission",
+            "close_notification",
+            "foreground_notifications_enabled",
+        ]),
     ))
     .expect("failed to run tauri-build");
 }

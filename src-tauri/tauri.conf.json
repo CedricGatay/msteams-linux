@@ -11,7 +11,7 @@
     "windows": [],
     "security": {
       "csp": null,
-      "capabilities": ["default"]
+      "capabilities": ["default", "notification-bridge"]
     }
   },
   "bundle": {
@@ -28,7 +28,10 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "infoPlist": "Info.plist"
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
     },
     "linux": {
       "deb": {

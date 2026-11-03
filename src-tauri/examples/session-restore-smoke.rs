@@ -3,6 +3,7 @@
 //! Then run the identical build with `restore`. Never uses real sign-in cookies.
 #[cfg(target_os = "macos")]
 #[path = "../src/session_restore.rs"]
+#[allow(dead_code)] // Standalone smoke does not exercise every loading-page helper.
 mod session_restore;
 
 // Separate from the real Teams profile. Also used by the included module's tests.
