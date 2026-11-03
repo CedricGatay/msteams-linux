@@ -30,6 +30,10 @@ gtk = "0.18"
 gio = "0.18"
 glib = "0.18"
 
+# Native macOS Keychain API; session-cookie values never touch plaintext files.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

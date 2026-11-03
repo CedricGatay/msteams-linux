@@ -10,12 +10,17 @@ hands external links off to your browser — without bundling the official
 
 ## Features
 
-- **Native window** that loads `https://teams.microsoft.com`.
+- **Native window** that loads `https://teams.cloud.microsoft/v2/` directly,
+  avoiding the legacy `teams.microsoft.com` entry-point redirect.
 - **External links** (`http`/`https` to non-Microsoft hosts) open in your default
   browser instead of taking over the app.
 - **In-app auth popups** — OAuth windows opened by Teams (`window.open`,
   `target="_blank"` to `login.microsoftonline.com`, …) are opened as separate
-  app windows so the sign-in flow completes inside the wrapper.
+  app windows so the sign-in flow completes inside the wrapper. Organization
+  SSO at `https://login.example.com`, `https://identity.example.com`, and the session
+  control proxy `https://tenant-proxy.example.net` also stays
+  in-app. Only those exact HTTPS hosts are allowed, not other `example.com` hosts
+  or other tenants under `access.mcas.ms`. Session-control policies still apply.
 - **Media & notifications** — camera, microphone, screen-share, media keys and
   notification permissions are granted automatically so notifications work and
   the call UI can request devices.
@@ -29,13 +34,19 @@ hands external links off to your browser — without bundling the official
   (driven by Teams' web notifications and the unread counter it puts in
   `document.title`). Left-clicking the tray icon restores the window,
   right-clicking opens the menu.
-- **Persistent session** — the WebView data directory lives under the app data
-  directory, so you stay signed in between launches.
+- **Persistent profile** — on Linux/Windows the WebView data directory lives
+  under the app data directory. On macOS 14+ all windows use one fixed WebKit
+  data-store identifier (older macOS uses WebKit's default persistent store).
+  Cookie/token expiry and organization-enforced sign-in frequency still apply.
 - **Third-party cookies on Linux** — WebKitGTK's default cookie accept policy is
   *exclusively from the main document's domain*, which drops the cookies Teams
   uses during sign-in. The wrapper switches the policy to *always* (and turns
   Intelligent Tracking Prevention off) before the first request leaves, so
   Teams' third-party-cookie probe succeeds.
+- **Browser identification** — main and sign-in windows use a desktop Chrome
+  user agent to avoid Teams rejecting the default embedded-WebView identity.
+  This does not turn WebKit into Chromium, add missing browser features, or
+  bypass organization authentication / device-compliance requirements.
 - **Cross-platform** — Linux, macOS and Windows (Tauri v2 runtime).
 
 ## Why the "third-party cookies" error page used to appear
@@ -118,6 +129,89 @@ sysroot without root using `apt-get download`:
 
 `build.sh` falls back to system packages automatically when the local sysroot is
 absent, so it is safe to use everywhere.
+
+## Calls / media access on macOS
+
+WebKit requires camera and microphone usage descriptions in the app's
+`Info.plist`. Without them the WebView can expose `RTCPeerConnection` while
+`navigator.mediaDevices.getUserMedia` is unavailable, causing Teams to report
+that calls cannot be made or received. `src-tauri/Info.plist` declares both uses.
+
+The main Teams page requests microphone and camera access once per document
+load, including after returning from sign-in. It requests each separately and
+immediately stops the test stream; no audio/video is recorded or sent. SSO pages
+and auth popups do not request capture access. Screen capture is never requested
+automatically. Use the tray menu's **Enable microphone and camera** to retry
+without signing in again. If macOS has already denied camera access, allow it
+under **System Settings → Privacy & Security → Camera**; a WebView request cannot
+force macOS to show the system prompt again.
+
+The fixed macOS 14+ WebKit profile replaces the previous default profile, so the
+first launch after this change requires signing in once. Subsequent launches
+reuse that profile. This does not override session expiry or organization
+policies. Quit via the tray menu before testing persistence across relaunches.
+
+Build and launch the app bundle, and allow macOS camera/microphone prompts:
+
+```bash
+npm run tauri -- build --debug --bundles app
+open "src-tauri/target/debug/bundle/macos/Microsoft Teams.app"
+```
+
+With `MSTEAMS_DEBUG=1`, the app logs a read-only media capability probe when
+Teams loads. It does not activate the microphone or camera. API availability
+alone does not verify end-to-end calling or organization policy compatibility.
+
+## Optional session restoration on macOS
+
+WebKit drops session-only cookies when the app exits. To retain those across a
+clean restart, right-click the tray icon and enable **Restore session on restart
+(Keychain)**. This is **off by default** for new installations. Enable it before
+quitting a signed-in session; the first successful capture requires signing in
+normally. No browser cookies or accounts are imported.
+
+- On a clean Quit (tray or application-menu/⌘Q), Secure session cookies from the exact
+  Teams and organization SSO hosts are saved in macOS Keychain. No cookie/token
+  values are written to files, diagnostic output, or command-line arguments.
+- The snapshot is restored before the main Teams navigation. Existing cookies
+  are not overwritten. Domain, path, Secure, HttpOnly and SameSite attributes
+  are round-tripped through the native cookie API; no expiry is added or changed.
+- Snapshots are scoped to this app's fixed WebKit profile, limited to 24 hours,
+  and consumed on use. A fresh snapshot is captured on the next clean Quit.
+  This is session restoration, not permanent token storage; server expiry,
+  sign-out and revocation still apply. It does not restore tab `sessionStorage`.
+- Startup falls back to normal sign-in after at most four seconds of restoration
+  work; Quit waits at most five seconds for capture. Locked/denied Keychain access
+  or a forced process termination may mean signing in again. The macOS application
+  menu's custom ⌘Q action is routed through capture; native Dock Quit and system
+  termination can bypass it, so use the tray or application menu for restoration.
+- **Disable session restore and forget saved session** stops restoration and
+  requests deletion of the Keychain snapshot, without signing out the currently
+  running app. Keychain access may prompt after a rebuild or if locked. If
+  deletion is denied, the entry can be removed in Keychain Access under
+  `com.github.msteams.desktop.session-restore`; disabled restoration will not use it.
+
+Only the opt-in boolean is saved outside Keychain, in
+`session-restore-enabled.json` under the app data directory. Linux and Windows
+retain their existing WebView behavior; this feature is macOS-only.
+
+## Diagnosing repeated sign-in
+
+A persistent profile does not necessarily restore session-only cookies or tab
+`sessionStorage` like a browser's session-restore feature does. The tray's
+**Save session diagnostics (metadata only)** action saves a best-effort
+`session-diagnostics-manual.json` snapshot in the app data directory
+(`~/Library/Application Support/com.github.msteams.desktop` on macOS).
+Diagnostics are manual-only: neither startup nor Quit waits for a diagnostic
+JavaScript callback. Save a copy before requesting another snapshot if comparing
+across restarts.
+
+Snapshots contain session/persistent/expired cookie counts for fixed sign-in
+hosts and local/session storage key counts (including MSAL-related key counts).
+They never contain cookie values, cookie names, storage values, storage keys,
+or token exports. They do not change cookie expiry or restore authentication
+state. Compare snapshots from the same build before drawing conclusions about
+WebKit versus server-enforced authentication.
 
 ## Calls / WebRTC on Linux
 

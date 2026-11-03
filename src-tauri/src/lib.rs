@@ -15,6 +15,13 @@
 //!   drive a red unread-count badge on the system tray icon,
 //! * closing the window hides the app to the tray instead of quitting.
 
+mod session_diagnostics;
+#[cfg(target_os = "macos")]
+mod session_restore;
+
+use session_diagnostics::snapshot;
+#[cfg(target_os = "macos")]
+use session_restore::SessionRestore;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -28,7 +35,23 @@ use tauri::{
 use tauri_plugin_notification::NotificationExt;
 
 /// Entry point of the Teams web client.
-const TEAMS_URL: &str = "https://teams.microsoft.com/v2/";
+const TEAMS_URL: &str = "https://teams.cloud.microsoft/v2/";
+
+/// Identify as desktop Chrome so Teams does not reject the embedded WebView's
+/// default user agent. This changes browser identification, not engine features
+/// or the organization's authentication/device-compliance requirements.
+const BROWSER_USER_AGENT: &str = concat!(
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ",
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
+);
+
+/// Stable macOS 14+ WebKit profile shared by the main window and auth popups.
+/// Unlike `data_directory` (unsupported by WKWebView), this selects an explicit
+/// persistent website data store. Never regenerate it on startup or rebuild.
+#[cfg(target_os = "macos")]
+const WEBKIT_PROFILE_ID: [u8; 16] = [
+    0xd0, 0xd7, 0xad, 0x45, 0x52, 0x8b, 0x41, 0x00, 0x93, 0xeb, 0x70, 0xb0, 0xc3, 0xbd, 0x13, 0xd0,
+];
 
 /// Domains that are allowed to load inside the application WebView. Anything
 /// host that matches one of these suffixes (or is an exact match) stays in the
@@ -76,7 +99,8 @@ enum WindowKind {
 }
 
 /// Returns `true` when `url` may be loaded inside the application without
-/// exposing the user to content that does not belong to Teams/Microsoft.
+/// exposing the user to content outside Teams/Microsoft or the organization's
+/// explicitly allowed HTTPS sign-in hosts.
 fn is_trusted(url: &Url) -> bool {
     match url.scheme() {
         // Internal schemes used by Tauri as well as ephemeral web content.
@@ -90,9 +114,31 @@ fn is_trusted(url: &Url) -> bool {
     };
 
     let host = host.to_ascii_lowercase();
+    // Organization SSO must stay in the same WebView session to complete login.
+    // Trust only these exact hosts over HTTPS, not all of example.com or subdomains.
+    if url.scheme() == "https"
+        && matches!(
+            host.as_str(),
+            "login.example.com" | "identity.example.com" | "tenant-proxy.example.net"
+        )
+    {
+        return true;
+    }
+
     TRUSTED_HOSTS
         .iter()
         .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+}
+
+/// Logs origins only: OAuth paths, query strings and fragments may hold secrets.
+fn log_navigation(event: &str, url: &Url) {
+    if std::env::var_os("MSTEAMS_DEBUG").is_some() {
+        eprintln!(
+            "[msteams] {event}: {} trusted={}",
+            url.origin().ascii_serialization(),
+            is_trusted(url)
+        );
+    }
 }
 
 /// Opens a URL in the user's default browser.
@@ -101,6 +147,7 @@ fn is_trusted(url: &Url) -> bool {
 /// while, so it runs off the UI thread: on Linux this is called from inside a
 /// WebKitGTK policy decision and blocking there would freeze the window.
 fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
+    log_navigation("external", url);
     let app = app.clone();
     let url = url.clone();
     std::thread::spawn(move || {
@@ -112,6 +159,16 @@ fn open_external<R: Runtime>(app: &AppHandle<R>, url: &Url) {
 /// Camera, microphone and notifications must be granted for Teams calls and
 /// notifications to work. Everything else keeps the browser default.
 fn permission_response(kind: PermissionKind) -> PermissionResponse {
+    if std::env::var_os("MSTEAMS_DEBUG").is_some() {
+        let capture = match kind {
+            PermissionKind::Camera => Some("camera"),
+            PermissionKind::Microphone => Some("microphone"),
+            _ => None,
+        };
+        if let Some(capture) = capture {
+            eprintln!("[msteams] permission requested: {capture}");
+        }
+    }
     match kind {
         PermissionKind::Camera
         | PermissionKind::Microphone
@@ -265,12 +322,9 @@ fn install_navigation_policy<R: Runtime>(window: &WebviewWindow<R>, app: AppHand
                 return false;
             };
 
+            log_navigation("navigation", &url);
             if is_trusted(&url) || !action.is_user_gesture() {
                 return false;
-            }
-
-            if std::env::var_os("MSTEAMS_DEBUG").is_some() {
-                eprintln!("[msteams] external link: {url}");
             }
 
             open_external(&app, &url);
@@ -301,15 +355,53 @@ fn create_window<R: Runtime>(
     let blank = Url::parse("about:blank").expect("about:blank is a valid URL");
     let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(blank))
         .title("Microsoft Teams")
+        // Set at the WebView level before navigation, for both HTTP requests
+        // and navigator.userAgent, including in authentication popups.
+        .user_agent(BROWSER_USER_AGENT)
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
-        .initialization_script(INJECT_JS);
+        .initialization_script(INJECT_JS)
+        .on_page_load(|window, payload| {
+            log_navigation("page-load", payload.url());
+            if std::env::var_os("MSTEAMS_DEBUG").is_some()
+                && matches!(
+                    payload.url().host_str(),
+                    Some("teams.cloud.microsoft" | "teams.microsoft.com")
+                )
+            {
+                let _ = window.eval(MEDIA_DIAGNOSTICS_JS);
+                let window = window.clone();
+                std::thread::spawn(move || {
+                    // Device enumeration is asynchronous. Read only the sanitized
+                    // summary, never device labels, identifiers or page content.
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    let _ = window
+                        .eval_with_callback("window.__msteamsMediaDiagnostics || null", |result| {
+                            eprintln!("[msteams] media capabilities: {result}")
+                        });
+                });
+            }
+        });
+
+    // All windows must share the same persistent profile during SSO. Older
+    // macOS versions fall back to WebKit's default persistent store.
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(WEBKIT_PROFILE_ID);
+
+    // Only the main Teams window requests capture access on startup. Auth
+    // popups must never activate camera/microphone permission requests.
+    let builder = if matches!(kind, WindowKind::Main) {
+        builder.initialization_script(include_str!("media-permissions.js"))
+    } else {
+        builder
+    };
 
     // Keep Teams/Microsoft navigation in-app, send the rest to the browser. On
     // Linux the policy is installed on the WebKitGTK webview instead, because
     // Tauri's handler also sees (and would block) sub-frame navigations.
     #[cfg(not(target_os = "linux"))]
     let builder = builder.on_navigation(move |url| {
+        log_navigation("navigation", url);
         if is_trusted(url) {
             true
         } else {
@@ -322,6 +414,7 @@ fn create_window<R: Runtime>(
         // `window.open` / target="_blank": complete OAuth popups in-app, open
         // ordinary web links in the system browser.
         .on_new_window(move |url, _features| {
+            log_navigation("popup", &url);
             if is_trusted(&url) {
                 let label = format!("auth-{}", WINDOW_SEQ.fetch_add(1, Ordering::Relaxed));
                 match create_window(
@@ -354,11 +447,58 @@ fn create_window<R: Runtime>(
         install_navigation_policy(&window, nav_app);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    // Never gate navigation on a JavaScript callback. Opt-in macOS restore uses
+    // native APIs on a worker, with a watchdog that loads Teams after four seconds.
+    #[cfg(target_os = "macos")]
+    if matches!(kind, WindowKind::Main) {
+        app.state::<SessionRestore>().navigate(&window, url);
+    } else {
+        window.navigate(url)?;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     window.navigate(url)?;
 
     Ok(window)
 }
+
+/// Passive capability probe: no media capture, permission requests or network calls.
+/// Device enumeration records counts only, never labels, IDs or group IDs.
+const MEDIA_DIAGNOSTICS_JS: &str = r#"
+(function () {
+  var result = {
+    secureContext: window.isSecureContext === true,
+    peerConnection: typeof RTCPeerConnection === 'function',
+    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+    displayCapture: !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia),
+    mediaCapabilities: typeof navigator.mediaCapabilities !== 'undefined',
+    audioContext: typeof AudioContext === 'function',
+    enumerateDevices: !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices),
+    setSinkId: typeof HTMLMediaElement.prototype.setSinkId === 'function',
+    selectAudioOutput: !!(navigator.mediaDevices && navigator.mediaDevices.selectAudioOutput),
+    capturePermissionResults: window.__msteamsMediaPermissionResults || null
+  };
+  window.__msteamsMediaDiagnostics = result;
+  if (result.enumerateDevices) {
+    result.devices = 'pending';
+    navigator.mediaDevices.enumerateDevices().then(function (devices) {
+      var counts = {audioinput: 0, audiooutput: 0, videoinput: 0};
+      devices.forEach(function (device) {
+        if (Object.prototype.hasOwnProperty.call(counts, device.kind)) counts[device.kind]++;
+      });
+      result.devices = counts;
+    }).catch(function (e) { result.devices = e.name; });
+  }
+  try {
+    var peer = new RTCPeerConnection({iceServers: []});
+    peer.close();
+    result.peerConstruction = 'ok';
+  } catch (e) {
+    result.peerConstruction = e.name;
+  }
+  return result;
+})();
+"#;
 
 /// JavaScript injected into every Teams window before the page scripts run.
 ///
@@ -592,7 +732,7 @@ fn show_notification(app: AppHandle, title: String, body: String) {
 /// Application entry point shared by the desktop binary and (potentially)
 /// mobile targets.
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
@@ -604,14 +744,56 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir).ok();
 
             app.manage(Unread(AtomicU32::new(0)));
+            #[cfg(target_os = "macos")]
+            app.manage(SessionRestore::new(data_dir.clone(), WEBKIT_PROFILE_ID));
+            #[cfg(target_os = "macos")]
+            session_restore::install_quit_menu(app.handle())?;
 
             // System tray: click to restore the window, right-click for the menu.
             let show_i =
                 MenuItem::with_id(app, "show", "Show Microsoft Teams", true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
+            let media_i = MenuItem::with_id(
+                app,
+                "media-permissions",
+                "Enable microphone and camera",
+                true,
+                None::<&str>,
+            )?;
+            let session_i = MenuItem::with_id(
+                app,
+                "session-diagnostics",
+                "Save session diagnostics (metadata only)",
+                true,
+                None::<&str>,
+            )?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_i, &hide_i, &separator, &quit_i])?;
+            let menu = Menu::with_items(
+                app,
+                &[&show_i, &hide_i, &media_i, &session_i, &separator, &quit_i],
+            )?;
+
+            #[cfg(target_os = "macos")]
+            let restore_i = {
+                let item = tauri::menu::CheckMenuItem::with_id(
+                    app,
+                    "restore-session",
+                    "Restore session on restart (Keychain)",
+                    true,
+                    app.state::<SessionRestore>().enabled(),
+                    None::<&str>,
+                )?;
+                let forget = MenuItem::with_id(
+                    app,
+                    "forget-restored-session",
+                    "Disable session restore and forget saved session",
+                    true,
+                    None::<&str>,
+                )?;
+                menu.insert_items(&[&item, &forget], 4)?;
+                item
+            };
 
             let mut tray = TrayIconBuilder::with_id("main")
                 .menu(&menu)
@@ -619,11 +801,42 @@ pub fn run() {
                 // window (see `on_tray_icon_event` below).
                 .show_menu_on_left_click(false)
                 .tooltip("Microsoft Teams")
-                .on_menu_event(|app, event| match event.id.as_ref() {
+                .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main(app),
                     "hide" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.hide();
+                        }
+                    }
+                    "media-permissions" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            let _ = window.eval(
+                                "if (window.__msteamsRequestMediaPermissions) { window.__msteamsRequestMediaPermissions(); }",
+                            );
+                        }
+                    }
+                    "session-diagnostics" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            snapshot(&window, "manual");
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    "restore-session" => {
+                        let state = app.state::<SessionRestore>();
+                        let enabled = restore_i.is_checked().unwrap_or(false);
+                        if state.set_enabled(enabled).is_err() {
+                            let _ = restore_i.set_checked(state.enabled());
+                            eprintln!("[msteams] could not save session-restore preference");
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    "forget-restored-session" => {
+                        let state = app.state::<SessionRestore>();
+                        let _ = restore_i.set_checked(false);
+                        if state.set_enabled(false).is_err() {
+                            eprintln!("[msteams] could not persist disabled session-restore preference");
                         }
                     }
                     "quit" => app.exit(0),
@@ -668,8 +881,18 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running the Microsoft Teams desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building the Microsoft Teams desktop application");
+
+    app.run(|_app, event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            _app.state::<SessionRestore>()
+                .on_exit(_app, &api, code.unwrap_or(0));
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = event;
+    });
 }
 
 #[cfg(test)]
@@ -698,6 +921,51 @@ mod tests {
         ] {
             assert!(is_trusted(&url(host)), "{host} should be trusted");
         }
+    }
+
+    #[test]
+    fn organization_sso_stays_in_app_only_on_exact_https_host() {
+        for target in [
+            "https://login.example.com/",
+            "https://login.example.com/login?returnUrl=https://teams.cloud.microsoft/",
+            "https://identity.example.com/",
+            "https://identity.example.com/adfs/ls/?client-request-id=example",
+            "https://tenant-proxy.example.net/aad_login",
+        ] {
+            assert!(is_trusted(&url(target)), "{target} must stay in-app");
+        }
+        for target in [
+            "http://login.example.com/",
+            "http://identity.example.com/",
+            "http://tenant-proxy.example.net/aad_login",
+            "https://other-tenant.access.mcas.ms/",
+            "https://sub.tenant-proxy.example.net/",
+            "https://tenant-proxy.example.net.evil.com/",
+            "https://tenant-proxy.example.net@evil.com/",
+            "https://sub.identity.example.com/",
+            "https://identity.example.com.evil.com/",
+            "https://identity.example.com@evil.com/",
+            "https://example.com/",
+            "https://other.das.example.com/",
+            "https://sub.login.example.com/",
+            "https://login.example.com.evil.com/",
+            "https://login.example.com@evil.com/",
+        ] {
+            assert!(!is_trusted(&url(target)), "{target} must not be trusted");
+        }
+    }
+
+    #[test]
+    fn teams_startup_and_cloud_redirects_stay_in_app() {
+        assert!(is_trusted(&url(TEAMS_URL)));
+        for target in [
+            "https://teams.cloud.microsoft/",
+            "https://teams.cloud.microsoft/v2/",
+            "https://teams.cloud.microsoft/v2/?tenantId=example",
+        ] {
+            assert!(is_trusted(&url(target)), "{target} must stay in-app");
+        }
+        assert!(!is_trusted(&url("https://teams.cloud.microsoft.evil.com/")));
     }
 
     #[test]
