@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "Teams Example",
+  "teams_url": "https://teams.cloud.microsoft/v2/",
+  "trusted_auth_hosts": ["login.example.com", "identity.example.net"],
+  "session_cookie_hosts": [
+    "login.microsoftonline.com", "teams.cloud.microsoft", "teams.microsoft.com",
+    "login.example.com", "identity.example.net"
+  ]
+}

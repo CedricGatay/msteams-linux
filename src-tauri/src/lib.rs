@@ -16,6 +16,11 @@
 //! * closing the window hides the app to the tray instead of quitting.
 
 #[cfg(target_os = "macos")]
+mod app_export;
+mod configuration;
+#[cfg(target_os = "macos")]
+mod configurator;
+#[cfg(target_os = "macos")]
 mod foreground_notifications;
 #[cfg(target_os = "macos")]
 mod native_notifications;
@@ -43,60 +48,16 @@ use tauri::{
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
-/// Entry point of the Teams web client.
+#[cfg(test)]
 const TEAMS_URL: &str = "https://teams.cloud.microsoft/v2/";
 
-/// Identify as desktop Chrome so Teams does not reject the embedded WebView's
-/// default user agent. This changes browser identification, not engine features
-/// or the organization's authentication/device-compliance requirements.
-const BROWSER_USER_AGENT: &str = concat!(
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ",
-    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-);
-
-/// Stable macOS 14+ WebKit profile shared by the main window and auth popups.
-/// Unlike `data_directory` (unsupported by WKWebView), this selects an explicit
-/// persistent website data store. Never regenerate it on startup or rebuild.
-#[cfg(target_os = "macos")]
+// Deterministic fixture only; runtime profiles come from validated settings.
+#[cfg(all(target_os = "macos", test))]
 const WEBKIT_PROFILE_ID: [u8; 16] = [
     0xd0, 0xd7, 0xad, 0x45, 0x52, 0x8b, 0x41, 0x00, 0x93, 0xeb, 0x70, 0xb0, 0xc3, 0xbd, 0x13, 0xd0,
 ];
 
-/// Domains that are allowed to load inside the application WebView. Anything
-/// host that matches one of these suffixes (or is an exact match) stays in the
-/// app; every other link is handed over to the system browser.
-///
-/// Keep this list as small as possible: it is the only thing preventing a
-/// malicious link from being loaded inside the privileged application context.
-const TRUSTED_HOSTS: &[&str] = &[
-    "teams.microsoft.com",
-    "msteams.microsoft.com",
-    "teams.live.com",
-    "microsoft.com",
-    "microsoftonline.com",
-    "live.com",
-    "office.com",
-    "office.net",
-    "office365.com",
-    "sharepoint.com",
-    "sharepointonline.com",
-    "cloud.microsoft",
-    "windows.net",
-    "msauth.net",
-    "msftauth.net",
-    "msauthimages.net",
-    "msftauthimages.net",
-    "skype.com",
-    "lync.com",
-    "aka.ms",
-    "azure.com",
-    "azure.net",
-    "trafficmanager.net",
-    // Teams serves its web client (and the pages it reports problems with, such
-    // as `report-third-party-cookies.html`) from its own OneCDN bucket, which
-    // lives under `static.microsoft`.
-    "static.microsoft",
-];
+// Generic defaults are in config/default.json; custom hosts are private runtime settings.
 
 /// Counter used to give every popup window a unique label.
 static WINDOW_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -112,32 +73,7 @@ enum WindowKind {
 /// exposing the user to content outside Teams/Microsoft or the organization's
 /// explicitly allowed HTTPS sign-in hosts.
 fn is_trusted(url: &Url) -> bool {
-    match url.scheme() {
-        // Internal schemes used by Tauri as well as ephemeral web content.
-        "tauri" | "asset" | "ipc" | "about" | "data" | "blob" => return true,
-        "http" | "https" => {}
-        _ => return false,
-    }
-
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-
-    let host = host.to_ascii_lowercase();
-    // Organization SSO must stay in the same WebView session to complete login.
-    // Trust only these exact hosts over HTTPS, not all of example.com or subdomains.
-    if url.scheme() == "https"
-        && matches!(
-            host.as_str(),
-            "login.example.com" | "identity.example.com" | "tenant-proxy.example.net"
-        )
-    {
-        return true;
-    }
-
-    TRUSTED_HOSTS
-        .iter()
-        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+    configuration::current().trusted(url)
 }
 
 /// Logs origins only: OAuth paths, query strings and fragments may hold secrets.
@@ -373,10 +309,10 @@ fn create_window<R: Runtime>(
         initial_url
     };
     let builder = WebviewWindowBuilder::new(app, label, initial_url)
-        .title("Microsoft Teams")
+        .title(configuration::current().name.clone())
         // Set at the WebView level before navigation, for both HTTP requests
         // and navigator.userAgent, including in authentication popups.
-        .user_agent(BROWSER_USER_AGENT)
+        .user_agent(&configuration::current().user_agent)
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
         .on_page_load(|window, payload| {
@@ -404,7 +340,7 @@ fn create_window<R: Runtime>(
     // All windows must share the same persistent profile during SSO. Older
     // macOS versions fall back to WebKit's default persistent store.
     #[cfg(target_os = "macos")]
-    let builder = builder.data_store_identifier(WEBKIT_PROFILE_ID);
+    let builder = builder.data_store_identifier(configuration::current().profile());
 
     // Notification/capture hooks belong only to the main window, not auth popups.
     let builder = if matches!(kind, WindowKind::Main) {
@@ -414,7 +350,13 @@ fn create_window<R: Runtime>(
         } else {
             builder
         };
-        let builder = builder.initialization_script(INJECT_JS);
+        let builder = builder
+            .initialization_script(format!(
+                "window.__msteamsAllowedNotificationOrigins = {};",
+                serde_json::to_string(&configuration::current().notification_origins)
+                    .expect("origins serialize")
+            ))
+            .initialization_script(INJECT_JS);
         #[cfg(target_os = "macos")]
         let builder = builder.initialization_script(include_str!("teams-foreground-adapter.js"));
         builder.initialization_script(include_str!("media-permissions.js"))
@@ -767,11 +709,7 @@ fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32
 /// Called from the injected script to show a native notification for a web
 /// notification fired by Teams.
 fn is_notification_origin(url: &Url) -> bool {
-    url.scheme() == "https"
-        && matches!(
-            url.host_str(),
-            Some("teams.cloud.microsoft" | "teams.microsoft.com")
-        )
+    configuration::current().notification_origin(url)
 }
 
 fn require_notification_window(window: &WebviewWindow) -> Result<(), String> {
@@ -940,6 +878,27 @@ fn send_test_notification(app: &AppHandle) {
 /// Application entry point shared by the desktop binary and (potentially)
 /// mobile targets.
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(target_os = "macos")]
+    let (context, launch) = {
+        let mut context = context;
+        let launch = configurator::prepare(&mut context);
+        (context, launch)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let _ = configuration::initialize(configuration::AppConfig::default());
+    #[cfg(target_os = "macos")]
+    if std::env::args().any(|arg| arg == "--check-config") {
+        println!(
+            "{}",
+            serde_json::json!({"valid": launch.error.is_none(),
+            "mode": if launch.configurator { "configurator" } else { "runtime" },
+            "identifier": context.config().identifier,
+            "profile_id": if launch.configurator { None } else { configuration::current().profile_id.as_ref() },
+            "error": launch.error})
+        );
+        std::process::exit(if launch.error.is_some() { 1 } else { 0 });
+    }
     let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
     #[cfg(not(target_os = "macos"))]
     let builder = builder.plugin(tauri_plugin_notification::init());
@@ -949,11 +908,29 @@ pub fn run() {
             show_notification,
             notification_permission,
             close_notification,
-            foreground_notifications_enabled
+            foreground_notifications_enabled,
+            #[cfg(target_os = "macos")]
+            configurator::configurator_status,
+            #[cfg(target_os = "macos")]
+            configurator::configurator_open_file,
+            #[cfg(target_os = "macos")]
+            configurator::configurator_export,
+            #[cfg(target_os = "macos")]
+            configurator::configurator_open_generated
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            if launch.configurator { configurator::setup(app, launch.error)?; return Ok(()); }
             let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir).ok();
+            std::fs::create_dir_all(&data_dir)?;
+            let capability = serde_json::json!({
+                "identifier": "configured-notifications",
+                "windows": ["main"],
+                "local": false,
+                "remote": {"urls": configuration::current().notification_origins.iter().map(|origin| format!("{origin}/*")).collect::<Vec<_>>()},
+                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count"]
+            });
+            app.add_capability(capability.to_string().as_str())?;
 
             app.manage(Unread(AtomicU32::new(0)));
             #[cfg(target_os = "macos")]
@@ -971,13 +948,13 @@ pub fn run() {
                 }));
             }
             #[cfg(target_os = "macos")]
-            app.manage(SessionRestore::new(data_dir.clone(), WEBKIT_PROFILE_ID));
+            app.manage(SessionRestore::new(data_dir.clone(), configuration::current().profile()));
             #[cfg(target_os = "macos")]
             session_restore::install_quit_menu(app.handle())?;
 
             // System tray: click to restore the window, right-click for the menu.
             let show_i =
-                MenuItem::with_id(app, "show", "Show Microsoft Teams", true, None::<&str>)?;
+                MenuItem::with_id(app, "show", format!("Show {}", configuration::current().name), true, None::<&str>)?;
             let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
             let media_i = MenuItem::with_id(
                 app,
@@ -1045,7 +1022,7 @@ pub fn run() {
                 // The menu is for the right button: a left click restores the
                 // window (see `on_tray_icon_event` below).
                 .show_menu_on_left_click(false)
-                .tooltip("Microsoft Teams")
+                .tooltip(configuration::current().name.clone())
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => show_main(app),
                     "hide" => {
@@ -1132,7 +1109,7 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            let url = Url::parse(TEAMS_URL).expect("TEAMS_URL is a valid URL");
+            let url = Url::parse(&configuration::current().teams_url).expect("validated start URL");
             let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
 
             #[cfg(target_os = "macos")]
@@ -1160,17 +1137,20 @@ pub fn run() {
                 if window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
+                } else if window.label() == "configurator" {
+                    window.app_handle().exit(0);
                 }
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building the Microsoft Teams desktop application");
 
     app.run(|_app, event| {
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-            _app.state::<SessionRestore>()
-                .on_exit(_app, &api, code.unwrap_or(0));
+            if let Some(state) = _app.try_state::<SessionRestore>() {
+                state.on_exit(_app, &api, code.unwrap_or(0));
+            }
         }
         #[cfg(not(target_os = "macos"))]
         let _ = event;
@@ -1241,6 +1221,13 @@ mod tests {
 
     #[test]
     fn organization_sso_stays_in_app_only_on_exact_https_host() {
+        let mut settings = configuration::AppConfig::default();
+        settings.trusted_auth_hosts = vec![
+            "login.example.com".into(),
+            "identity.example.com".into(),
+            "tenant-proxy.example.net".into(),
+        ];
+        let is_trusted = |url: &Url| settings.trusted(url);
         for target in [
             "https://login.example.com/",
             "https://login.example.com/login?returnUrl=https://teams.cloud.microsoft/",

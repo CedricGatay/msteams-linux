@@ -11,13 +11,14 @@
     "windows": [],
     "security": {
       "csp": null,
-      "capabilities": ["default", "notification-bridge"]
+      "capabilities": ["default", "notification-bridge", "configurator"]
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "resources": { "../config/runtime-template.json": "runtime-template.json" },
     "shortDescription": "Microsoft Teams desktop client",
     "longDescription": "An unofficial desktop wrapper for Microsoft Teams built with Tauri.",
     "icon": [

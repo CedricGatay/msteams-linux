@@ -19,16 +19,17 @@ use tauri::{
 pub fn install_quit_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     let menu = Menu::default(app)?;
     menu.remove_at(0)?;
+    let app_name = app.config().product_name.as_deref().unwrap_or("Teams");
     let quit = MenuItem::with_id(
         app,
         "quit-app",
-        "Quit Microsoft Teams",
+        format!("Quit {app_name}"),
         true,
         Some("CmdOrCtrl+Q"),
     )?;
     let app_menu = Submenu::with_items(
         app,
-        "Microsoft Teams",
+        app_name,
         true,
         &[
             &PredefinedMenuItem::about(app, None, None)?,
@@ -51,7 +52,12 @@ pub fn install_quit_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-const SERVICE: &str = "com.github.msteams.desktop.session-restore";
+fn service_name() -> String {
+    format!(
+        "{}.session-restore",
+        super::configuration::current().identifier()
+    )
+}
 // Derive the Keychain account from the actual WebKit profile, including in tests.
 fn profile_account(profile: [u8; 16]) -> String {
     let hex: String = profile.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -96,19 +102,7 @@ fn eligible(cookie: &Cookie) -> bool {
         && cookie.max_age().is_none()
         && !cookie.name().is_empty()
         && cookie.path().is_some_and(|path| path.starts_with('/'))
-        && matches!(
-            cookie
-                .domain()
-                .unwrap_or("")
-                .strip_prefix('.')
-                .unwrap_or(cookie.domain().unwrap_or("")),
-            "identity.example.com"
-                | "login.example.com"
-                | "login.microsoftonline.com"
-                | "teams.cloud.microsoft"
-                | "teams.microsoft.com"
-                | "tenant-proxy.example.net"
-        )
+        && super::configuration::current().cookie_host_allowed(cookie.domain().unwrap_or(""))
 }
 
 fn encode(cookies: &[Cookie], saved_at: u64) -> Result<Option<Vec<u8>>, ()> {
@@ -163,7 +157,7 @@ fn decode(bytes: &[u8], current_time: u64) -> Result<Vec<Cookie>, ()> {
 
 // Secrets are never included in status messages, preferences, or diagnostic files.
 fn delete_saved(account: &str) -> Result<(), ()> {
-    match delete_generic_password(SERVICE, account) {
+    match delete_generic_password(&service_name(), account) {
         Ok(()) => Ok(()),
         Err(error) if error.code() == ITEM_NOT_FOUND => Ok(()),
         Err(_) => Err(()),
@@ -224,7 +218,7 @@ impl SessionRestore {
         let enabled = std::fs::read(&preference)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
-            .unwrap_or(false);
+            .unwrap_or(super::configuration::current().restore_session);
         Self(Arc::new(Inner {
             enabled: AtomicBool::new(enabled),
             generation: AtomicU64::new(0),
@@ -320,7 +314,7 @@ impl SessionRestore {
                 // after the snapshot is consumed. No remote page is loaded yet.
                 let existing = window.cookies().map_err(|_| ())?;
                 let cookies = load_active_snapshot(
-                    || match get_generic_password(SERVICE, &state.0.account) {
+                    || match get_generic_password(&service_name(), &state.0.account) {
                         Ok(bytes) => Ok(Some(bytes)),
                         Err(error) if error.code() == ITEM_NOT_FOUND => {
                             eprintln!("[msteams] no saved session in Keychain");
@@ -469,7 +463,7 @@ impl SessionRestore {
                 let payload = encode(&cookies, now())?;
                 if state.enabled() && state.0.exit_phase.load(Ordering::SeqCst) == 1 {
                     if let Some(payload) = payload {
-                        set_generic_password(SERVICE, &state.0.account, &payload)
+                        set_generic_password(&service_name(), &state.0.account, &payload)
                             .map_err(|_| ())?;
                         eprintln!("[msteams] session snapshot saved to Keychain: {eligible_count} cookies");
                     }
@@ -511,8 +505,13 @@ mod tests {
     use tauri::webview::cookie::{time::OffsetDateTime, SameSite};
 
     fn session(domain: &str) -> Cookie {
+        // Synthetic aliases map to default Microsoft cookie hosts; prefix/suffix
+        // mutations remain intact so exact-host rejection is still exercised.
+        let domain = domain
+            .replace("identity.example.com", "login.microsoftonline.com")
+            .replace("login.example.com", "teams.microsoft.com");
         Cookie::build(("test-cookie", "synthetic-test-secret"))
-            .domain(domain.to_owned())
+            .domain(domain)
             .path("/")
             .secure(true)
             .http_only(true)
@@ -545,7 +544,9 @@ mod tests {
     fn delayed_keychain_response_after_skip_does_not_consume_snapshot() {
         let cancelled = AtomicBool::new(false);
         let deleted = AtomicBool::new(false);
-        let bytes = encode(&[session("identity.example.com")], 100).unwrap().unwrap();
+        let bytes = encode(&[session("identity.example.com")], 100)
+            .unwrap()
+            .unwrap();
         let result = load_active_snapshot(
             || {
                 cancelled.store(true, Ordering::SeqCst);
@@ -566,7 +567,9 @@ mod tests {
     #[test]
     fn active_restore_consumes_snapshot_before_returning_cookies() {
         let deleted = AtomicBool::new(false);
-        let bytes = encode(&[session("identity.example.com")], 100).unwrap().unwrap();
+        let bytes = encode(&[session("identity.example.com")], 100)
+            .unwrap()
+            .unwrap();
         let result = load_active_snapshot(
             || Ok(Some(bytes)),
             || {
@@ -586,7 +589,9 @@ mod tests {
     fn expiry_is_checked_after_the_keychain_prompt_not_before_it() {
         let clock = AtomicU64::new(100);
         let deleted = AtomicBool::new(false);
-        let bytes = encode(&[session("identity.example.com")], 100).unwrap().unwrap();
+        let bytes = encode(&[session("identity.example.com")], 100)
+            .unwrap()
+            .unwrap();
         assert!(load_active_snapshot(
             || {
                 clock.store(101 + MAX_AGE_SECONDS, Ordering::SeqCst);
@@ -682,7 +687,9 @@ mod tests {
 
     #[test]
     fn rejects_stale_future_malformed_or_oversized_payloads() {
-        let bytes = encode(&[session("identity.example.com")], 100).unwrap().unwrap();
+        let bytes = encode(&[session("identity.example.com")], 100)
+            .unwrap()
+            .unwrap();
         assert!(decode(&bytes, 100 + MAX_AGE_SECONDS + 1).is_err());
         assert!(decode(&bytes, 99).is_err());
         assert!(decode(b"not json", 100).is_err());
@@ -732,7 +739,9 @@ mod tests {
 
     #[test]
     fn saved_session_is_valid_only_within_the_bounded_restore_window() {
-        let bytes = encode(&[session("identity.example.com")], 100).unwrap().unwrap();
+        let bytes = encode(&[session("identity.example.com")], 100)
+            .unwrap()
+            .unwrap();
         assert!(decode(&bytes, 100 + MAX_AGE_SECONDS).is_ok());
         assert!(decode(&bytes, 101 + MAX_AGE_SECONDS).is_err());
     }

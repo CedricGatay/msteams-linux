@@ -33,6 +33,11 @@ if [[ -n "${MSTEAMS_DEBUG:-}" ]]; then
   OPEN_ARGS+=(--env "MSTEAMS_DEBUG=$MSTEAMS_DEBUG")
 fi
 if [[ -n "${MSTEAMS_LOG_FILE:-}" ]]; then
+  if [[ -L "$MSTEAMS_LOG_FILE" ]]; then echo "Refusing a symlinked private log destination" >&2; exit 1; fi
+  LOG_PARENT="$(cd "$(dirname "$MSTEAMS_LOG_FILE")" && pwd -P)"
+  case "$LOG_PARENT/$(basename "$MSTEAMS_LOG_FILE")" in
+    "$ROOT"/*) echo "Private logs must be outside the source checkout" >&2; exit 1 ;;
+  esac
   OPEN_ARGS+=(--stderr "$MSTEAMS_LOG_FILE")
 fi
 exec /usr/bin/open "${OPEN_ARGS[@]}"

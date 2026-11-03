@@ -20,25 +20,19 @@ struct CookieCounts {
     expired: u32,
 }
 
-fn cookie_counts(cookies: &[tauri::webview::Cookie<'_>]) -> BTreeMap<&'static str, CookieCounts> {
+fn cookie_counts(cookies: &[tauri::webview::Cookie<'_>]) -> BTreeMap<String, CookieCounts> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
     let mut counts = BTreeMap::<_, CookieCounts>::new();
     for cookie in cookies {
-        // Only fixed authentication/Teams domains; never serialize arbitrary
-        // cookie domains, names, paths, identifiers, or values.
-        let host = match cookie.domain().unwrap_or("").trim_start_matches('.') {
-            "login.microsoftonline.com" => "login.microsoftonline.com",
-            "teams.cloud.microsoft" => "teams.cloud.microsoft",
-            "teams.microsoft.com" => "teams.microsoft.com",
-            "login.example.com" => "login.example.com",
-            "identity.example.com" => "identity.example.com",
-            "tenant-proxy.example.net" => "tenant-proxy.example.net",
-            _ => continue,
-        };
-        let entry = counts.entry(host).or_default();
+        // Only explicitly configured cookie hosts; never names/paths/values.
+        let host = cookie.domain().unwrap_or("").trim_start_matches('.');
+        if !super::configuration::current().cookie_host_allowed(host) {
+            continue;
+        }
+        let entry = counts.entry(host.to_owned()).or_default();
         if let Some(expires) = cookie.expires_datetime() {
             entry.persistent += 1;
             if expires.unix_timestamp() <= now {

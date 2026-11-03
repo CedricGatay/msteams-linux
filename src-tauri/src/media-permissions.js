@@ -2,7 +2,9 @@
 // Streams are used only to obtain permission and are stopped immediately.
 (function () {
   if (window.top !== window || !window.isSecureContext) return;
-  if (!["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname)) return;
+  var allowedOrigins = window.__msteamsAllowedNotificationOrigins;
+  if (Array.isArray(allowedOrigins) ? !allowedOrigins.includes(location.origin)
+      : !["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname)) return;
   if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") return;
   if (window.__msteamsRequestMediaPermissions) return;
 

@@ -2,6 +2,10 @@
 //! Usage: MSTEAMS_RESTORE_SMOKE_DIR=/tmp/unique-dir cargo run --example session-restore-smoke -- seed
 //! Then run the identical build with `restore`. Never uses real sign-in cookies.
 #[cfg(target_os = "macos")]
+#[path = "../src/configuration.rs"]
+#[allow(dead_code)]
+mod configuration;
+#[cfg(target_os = "macos")]
 #[path = "../src/session_restore.rs"]
 #[allow(dead_code)] // Standalone smoke does not exercise every loading-page helper.
 mod session_restore;
@@ -42,7 +46,7 @@ fn main() {
             let result = (|| -> Result<(), ()> {
                 if seed {
                     let cookie = tauri::webview::Cookie::build(("msteams_synthetic", "synthetic-not-an-auth-token"))
-                        .domain("identity.example.com").path("/").secure(true).http_only(true).build();
+                        .domain("login.microsoftonline.com").path("/").secure(true).http_only(true).build();
                     window.set_cookie(cookie).map_err(|_| ())?;
                     if !window.cookies().map_err(|_| ())?.iter().any(|c| c.name() == "msteams_synthetic") {
                         return Err(());

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "Microsoft Teams",
+  "identifier": "com.github.msteams.desktop",
+  "profile_id": "d0d7ad45-528b-4100-93eb-70b0c3bd13d0",
+  "teams_url": "https://teams.cloud.microsoft/v2/",
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+  "trusted_host_suffixes": [
+    "teams.microsoft.com", "msteams.microsoft.com", "teams.live.com", "microsoft.com",
+    "microsoftonline.com", "live.com", "office.com", "office.net", "office365.com",
+    "sharepoint.com", "sharepointonline.com", "cloud.microsoft", "windows.net",
+    "msauth.net", "msftauth.net", "msauthimages.net", "msftauthimages.net",
+    "skype.com", "lync.com", "aka.ms", "azure.com", "azure.net", "trafficmanager.net", "static.microsoft"
+  ],
+  "trusted_auth_hosts": [],
+  "notification_origins": ["https://teams.cloud.microsoft", "https://teams.microsoft.com"],
+  "session_cookie_hosts": ["login.microsoftonline.com", "teams.cloud.microsoft", "teams.microsoft.com"],
+  "restore_session": false,
+  "native_foreground": false
+}

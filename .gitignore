@@ -10,3 +10,11 @@ npm-debug.log*
 # Local build sysroots and WebKitGTK build artifacts
 .tauri-sysroot/
 .webrtc-webkit/
+
+# Defense in depth only: personal settings/apps belong outside this checkout.
+runtime-config.json
+*.private.json
+*.local.json
+*.app/
+*.dmg
+*.bundle

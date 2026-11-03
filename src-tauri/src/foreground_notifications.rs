@@ -22,7 +22,7 @@ impl ForegroundNotifications {
         let saved = std::fs::read(&preference)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<bool>(&bytes).ok())
-            .unwrap_or(false);
+            .unwrap_or(super::configuration::current().native_foreground);
         Self {
             enabled: AtomicBool::new(force_enabled || saved),
             preference,

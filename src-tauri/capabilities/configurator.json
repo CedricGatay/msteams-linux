@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "configurator",
+  "description": "Native configuration selection and app export from the local configurator only.",
+  "windows": ["configurator"],
+  "local": true,
+  "permissions": [
+    "allow-configurator-status",
+    "allow-configurator-open-file",
+    "allow-configurator-export",
+    "allow-configurator-open-generated"
+  ]
+}

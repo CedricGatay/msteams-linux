@@ -2078,6 +2078,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-user-notifications",
+ "plist",
  "security-framework",
  "serde",
  "serde_json",
@@ -2085,6 +2086,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "uuid",
  "webkit2gtk",
 ]
 

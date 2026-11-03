@@ -155,18 +155,21 @@ fn page(url: &Url) -> Page {
     if super::SessionRestore::is_restore_page(url) {
         return Page::Restoring;
     }
-    match url.host_str() {
-        Some("teams.cloud.microsoft" | "teams.microsoft.com") if url.scheme() == "https" => {
-            Page::Teams
-        }
-        Some(
-            "login.microsoftonline.com"
-            | "login.live.com"
-            | "identity.example.com"
-            | "login.example.com"
-            | "tenant-proxy.example.net",
-        ) => Page::SignIn,
-        _ => Page::Other,
+    if super::configuration::current().notification_origin(url) {
+        return Page::Teams;
+    }
+    if matches!(
+        url.host_str(),
+        Some("login.microsoftonline.com" | "login.live.com")
+    ) || url.host_str().is_some_and(|host| {
+        super::configuration::current()
+            .trusted_auth_hosts
+            .iter()
+            .any(|allowed| host == allowed)
+    }) {
+        Page::SignIn
+    } else {
+        Page::Other
     }
 }
 
@@ -264,7 +267,7 @@ mod tests {
             Page::Restoring
         );
         assert_eq!(
-            page(&Url::parse("https://identity.example.com/adfs/ls/?token=synthetic").unwrap()),
+            page(&Url::parse("https://login.microsoftonline.com/common/?token=synthetic").unwrap()),
             Page::SignIn
         );
         assert_eq!(

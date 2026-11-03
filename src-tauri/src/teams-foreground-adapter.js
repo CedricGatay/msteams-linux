@@ -6,7 +6,10 @@
     module.exports = {createAdapter: createAdapter};
     return;
   }
-  if (window.top !== window || !["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname)) return;
+  var allowedOrigins = window.__msteamsAllowedNotificationOrigins;
+  var allowedPage = Array.isArray(allowedOrigins) ? allowedOrigins.includes(location.origin)
+    : ["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname);
+  if (window.top !== window || !allowedPage) return;
   var adapter = createAdapter({window: window, document: document,
     enabled: false, trace: window.__msteamsNotificationTraceEnabled === true});
   var preferenceRevision = 0;

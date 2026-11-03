@@ -6,6 +6,10 @@ fn main() {
             "notification_permission",
             "close_notification",
             "foreground_notifications_enabled",
+            "configurator_status",
+            "configurator_open_file",
+            "configurator_export",
+            "configurator_open_generated",
         ]),
     ))
     .expect("failed to run tauri-build");

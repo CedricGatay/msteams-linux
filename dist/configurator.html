@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Teams Configurator</title>
+  <style>
+    :root { color-scheme: light dark; font: 15px system-ui, -apple-system, sans-serif; }
+    body { margin: 0; padding: 2rem; background: #1f1f1f; color: #eee; }
+    main { max-width: 40rem; margin: auto; } p { line-height: 1.6; color: #ccc; }
+    h1 { margin-top: 0; } label { display: block; margin: 1.5rem 0 .4rem; }
+    input { box-sizing: border-box; padding: .7rem; width: 100%; font: inherit; border: 1px solid #888; border-radius: .4rem; }
+    button { font: inherit; padding: .7rem 1rem; border: 0; border-radius: .4rem; margin: .5rem .3rem .5rem 0; cursor: pointer; }
+    .primary { background: #6264a7; color: white; } button:disabled { opacity: .45; cursor: default; }
+    #summary, #result { white-space: pre-wrap; overflow-wrap: anywhere; color: #ccc; }
+    #status { min-height: 3rem; padding: .8rem 0; } .error { color: #ffb4ab; }
+    small { display: block; color: #aaa; line-height: 1.6; margin-top: 1rem; }
+  </style>
+</head>
+<body><main>
+  <h1>Teams Configurator</h1>
+  <p>Open a trusted JSON configuration, then create an independent macOS application.
+    No Rust installation is needed. Your sign-in and Keychain data are never copied.</p>
+  <button id="open">Open configuration file…</button>
+  <p id="summary">No configuration selected.</p>
+  <label for="name">Application name</label><input id="name" maxlength="80" autocomplete="off" placeholder="Teams Example" />
+  <button id="export" class="primary" disabled>Create app…</button>
+  <button id="launch" disabled>Open generated app</button>
+  <div id="status" role="status" aria-live="polite"></div>
+  <p id="result"></p>
+  <small>Configurations choose trusted hosts and native integration origins. Use only files you trust.
+    Save personal settings and generated applications outside the source checkout.
+    New apps get isolated identities; updating an existing generated app preserves its identity.
+    Local exports are ad-hoc signed, not notarized for public distribution.</small>
+</main><script src="configurator.js"></script></body>
+</html>

@@ -14,11 +14,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "dynamic-acl"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+plist = "1"
 
 # Used on Linux to reach the underlying WebKitGTK webview and apply the settings
 # Teams requires (third-party cookies, MediaCapabilities and WebRTC). The feature
@@ -34,9 +36,9 @@ glib = "0.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.11"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSRunningApplication"] }
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError", "NSURL"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationContent", "UNNotificationSound", "UNNotificationSettings", "UNNotificationResponse"] }
 
 [profile.release]

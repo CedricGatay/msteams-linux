@@ -1,6 +1,9 @@
 // Teams page notifications -> native OS notifications. No message contents in logs.
 (function () {
-  if (window.top !== window || !["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname)) return;
+  var allowedOrigins = window.__msteamsAllowedNotificationOrigins;
+  var allowedPage = Array.isArray(allowedOrigins) ? allowedOrigins.includes(location.origin)
+    : ["teams.cloud.microsoft", "teams.microsoft.com"].includes(location.hostname);
+  if (window.top !== window || !allowedPage) return;
   if (window.__msteamsHooked) return;
   window.__msteamsHooked = true;
 
