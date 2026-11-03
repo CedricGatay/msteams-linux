@@ -15,11 +15,20 @@
 //!   drive a red unread-count badge on the system tray icon,
 //! * closing the window hides the app to the tray instead of quitting.
 
+// objc2::exception::catch cannot catch Objective-C exceptions with panic=abort.
+// Wry relies on it when a WKURLSchemeTask is cancelled during navigation.
+#[cfg(all(target_os = "macos", panic = "abort"))]
+compile_error!("macOS WebKit requires panic=unwind for Objective-C exception handling");
+
 #[cfg(target_os = "macos")]
 mod app_export;
+#[cfg(target_os = "macos")]
+mod avatar_diagnostics;
 mod configuration;
 #[cfg(target_os = "macos")]
 mod configurator;
+#[cfg(target_os = "macos")]
+mod dock_badge;
 #[cfg(target_os = "macos")]
 mod foreground_notifications;
 #[cfg(target_os = "macos")]
@@ -29,6 +38,8 @@ mod notification_trace;
 mod session_diagnostics;
 #[cfg(target_os = "macos")]
 mod session_restore;
+#[cfg(target_os = "macos")]
+mod zoom;
 
 #[cfg(target_os = "macos")]
 use foreground_notifications::ForegroundNotifications;
@@ -295,7 +306,8 @@ fn create_window<R: Runtime>(
     let popup_dir = data_dir.clone();
 
     // Linux and popups start on about:blank; macOS session restore uses a local
-    // loading page. Teams navigation starts only once native preparation is in
+    // embedded data loading page (no asynchronous custom-protocol task). Teams
+    // navigation starts only once native preparation is in
     // place *before* the first request goes out. Teams runs its third-party
     // cookie probe right at start-up and treats a blocked probe as "this
     // browser is broken".
@@ -304,7 +316,7 @@ fn create_window<R: Runtime>(
     #[cfg(target_os = "macos")]
     let initial_url = if matches!(kind, WindowKind::Main) && app.state::<SessionRestore>().enabled()
     {
-        WebviewUrl::App(session_restore::RESTORE_PAGE.into())
+        WebviewUrl::External(session_restore::restore_page_url())
     } else {
         initial_url
     };
@@ -312,11 +324,21 @@ fn create_window<R: Runtime>(
         .title(configuration::current().name.clone())
         // Set at the WebView level before navigation, for both HTTP requests
         // and navigator.userAgent, including in authentication popups.
-        .user_agent(&configuration::current().user_agent)
+        .user_agent(configuration::current().browser_user_agent())
         .data_directory(data_dir)
         .min_inner_size(400.0, 300.0)
         .on_page_load(|window, payload| {
             log_navigation("page-load", payload.url());
+            #[cfg(target_os = "macos")]
+            if window.label() == "main" {
+                if is_notification_origin(payload.url()) {
+                    if let Some(zoom) = window.app_handle().try_state::<zoom::Zoom>() {
+                        zoom.restore(&window);
+                    }
+                } else {
+                    let _ = window.set_zoom(1.0);
+                }
+            }
             if std::env::var_os("MSTEAMS_DEBUG").is_some()
                 && matches!(
                     payload.url().host_str(),
@@ -359,7 +381,10 @@ fn create_window<R: Runtime>(
             .initialization_script(INJECT_JS);
         #[cfg(target_os = "macos")]
         let builder = builder.initialization_script(include_str!("teams-foreground-adapter.js"));
-        builder.initialization_script(include_str!("media-permissions.js"))
+        let builder = builder.initialization_script(include_str!("media-permissions.js"));
+        #[cfg(target_os = "macos")]
+        let builder = builder.initialization_script(include_str!("zoom-hotkeys.js"));
+        builder
     } else {
         builder
     };
@@ -427,7 +452,7 @@ fn create_window<R: Runtime>(
     }
 
     // Never gate navigation on a JavaScript callback. Opt-in macOS restore uses
-    // native APIs on a worker. A local loading page allows Keychain approval or
+    // native APIs on a worker. An embedded loading page allows Keychain approval or
     // an explicit skip, with a bounded two-minute fallback.
     #[cfg(target_os = "macos")]
     if matches!(kind, WindowKind::Main) {
@@ -704,6 +729,8 @@ fn close_popups<R: Runtime>(app: &AppHandle<R>) {
 fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32) {
     unread.0.store(count, Ordering::Relaxed);
     update_tray(&app, count);
+    #[cfg(target_os = "macos")]
+    dock_badge::update(&app, count);
 }
 
 /// Called from the injected script to show a native notification for a web
@@ -741,6 +768,21 @@ fn notification_payload(
         title.chars().take(512).collect()
     };
     Ok((id, title, body.chars().take(4096).collect()))
+}
+
+#[tauri::command]
+fn zoom_teams(app: AppHandle, window: WebviewWindow, action: String) -> Result<(), String> {
+    require_notification_window(&window)?;
+    #[cfg(target_os = "macos")]
+    {
+        let action = zoom::Action::parse(&action).ok_or("Invalid zoom action")?;
+        app.state::<zoom::Zoom>().apply(&window, action)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, action);
+        Err("Native zoom controls are macOS-only".into())
+    }
 }
 
 #[tauri::command]
@@ -909,6 +951,7 @@ pub fn run() {
             notification_permission,
             close_notification,
             foreground_notifications_enabled,
+            zoom_teams,
             #[cfg(target_os = "macos")]
             configurator::configurator_status,
             #[cfg(target_os = "macos")]
@@ -928,7 +971,7 @@ pub fn run() {
                 "windows": ["main"],
                 "local": false,
                 "remote": {"urls": configuration::current().notification_origins.iter().map(|origin| format!("{origin}/*")).collect::<Vec<_>>()},
-                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count"]
+                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams"]
             });
             app.add_capability(capability.to_string().as_str())?;
 
@@ -951,6 +994,10 @@ pub fn run() {
             app.manage(SessionRestore::new(data_dir.clone(), configuration::current().profile()));
             #[cfg(target_os = "macos")]
             session_restore::install_quit_menu(app.handle())?;
+            #[cfg(target_os = "macos")]
+            zoom::install(app.handle(), data_dir.clone())?;
+            #[cfg(target_os = "macos")]
+            dock_badge::update(app.handle(), 0);
 
             // System tray: click to restore the window, right-click for the menu.
             let show_i =
@@ -979,6 +1026,12 @@ pub fn run() {
                 app,
                 &[&show_i, &hide_i, &media_i, &notification_i, &session_i, &separator, &quit_i],
             )?;
+
+            #[cfg(target_os = "macos")]
+            {
+                let item = MenuItem::with_id(app, "avatar-diagnostics", "Save avatar diagnostics (metadata only)", true, None::<&str>)?;
+                menu.insert(&item, 5)?;
+            }
 
             #[cfg(target_os = "macos")]
             if notification_trace::enabled() {
@@ -1057,6 +1110,12 @@ pub fn run() {
                         #[cfg(not(target_os = "macos"))]
                         let _ = app.notification().builder().title("Microsoft Teams")
                             .body("Native notification bridge is working.").show();
+                    }
+                    #[cfg(target_os = "macos")]
+                    "avatar-diagnostics" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            avatar_diagnostics::snapshot(&window);
+                        }
                     }
                     "session-diagnostics" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -1221,12 +1280,14 @@ mod tests {
 
     #[test]
     fn organization_sso_stays_in_app_only_on_exact_https_host() {
-        let mut settings = configuration::AppConfig::default();
-        settings.trusted_auth_hosts = vec![
-            "login.example.com".into(),
-            "identity.example.com".into(),
-            "tenant-proxy.example.net".into(),
-        ];
+        let settings = configuration::AppConfig {
+            trusted_auth_hosts: vec![
+                "login.example.com".into(),
+                "identity.example.com".into(),
+                "tenant-proxy.example.net".into(),
+            ],
+            ..Default::default()
+        };
         let is_trusted = |url: &Url| settings.trusted(url);
         for target in [
             "https://login.example.com/",

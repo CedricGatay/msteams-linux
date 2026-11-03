@@ -9,7 +9,7 @@ use tauri::Url;
 
 pub const CONFIG_RESOURCE: &str = "runtime-config.json";
 pub const CONFIGURATOR_MARKER: &str = "configurator-mode.json";
-pub const LEGACY_IDENTIFIER: &str = "com.github.msteams.desktop";
+pub const DEFAULT_IDENTIFIER: &str = "org.9h41.teams";
 pub const LEGACY_PROFILE: &str = "d0d7ad45-528b-4100-93eb-70b0c3bd13d0";
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const DEFAULT_JSON: &str = include_str!("../../config/default.json");
@@ -43,6 +43,40 @@ impl Default for AppConfig {
     fn default() -> Self {
         serde_json::from_str(DEFAULT_JSON).expect("valid generic built-in settings")
     }
+}
+
+fn default_browser_user_agent() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        let version = [
+            "/Applications/Safari.app/Contents/Info.plist",
+            "/System/Applications/Safari.app/Contents/Info.plist",
+        ]
+        .iter()
+        .find_map(|path| {
+            let value = plist::Value::from_file(path).ok()?;
+            let version = value
+                .as_dictionary()?
+                .get("CFBundleShortVersionString")?
+                .as_string()?;
+            valid_safari_version(version).then(|| version.to_owned())
+        })
+        .unwrap_or_else(|| "17.1".into());
+        format!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36".into()
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn valid_safari_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 16
+        && version.split('.').all(|part| {
+            !part.is_empty() && part.len() <= 3 && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 pub fn current() -> &'static AppConfig {
@@ -215,8 +249,19 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Explicit overrides remain exact. Automatic macOS identification matches
+    /// WebKit/Safari rather than advertising unsupported Chromium behavior.
+    pub fn browser_user_agent(&self) -> &str {
+        static AUTOMATIC: OnceLock<String> = OnceLock::new();
+        if self.user_agent == "auto" {
+            AUTOMATIC.get_or_init(default_browser_user_agent)
+        } else {
+            &self.user_agent
+        }
+    }
+
     pub fn identifier(&self) -> &str {
-        self.identifier.as_deref().unwrap_or(LEGACY_IDENTIFIER)
+        self.identifier.as_deref().unwrap_or(DEFAULT_IDENTIFIER)
     }
     pub fn profile(&self) -> [u8; 16] {
         *uuid::Uuid::parse_str(self.profile_id.as_deref().unwrap_or(LEGACY_PROFILE))
@@ -268,7 +313,7 @@ impl AppConfig {
             self.profile_id = old.profile_id.clone();
         } else {
             self.identifier = Some(format!(
-                "com.github.msteams.generated.app{}",
+                "org.9h41.teams.generated.app{}",
                 uuid::Uuid::new_v4().simple()
             ));
             self.profile_id = Some(uuid::Uuid::new_v4().to_string());
@@ -307,6 +352,37 @@ pub fn ensure_private_destination(path: &Path) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     #[test]
+    fn automatic_browser_identity_matches_platform_and_preserves_overrides() {
+        let config = AppConfig::default();
+        assert_eq!(config.user_agent, "auto");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(config.browser_user_agent().contains("Version/"));
+            assert!(config.browser_user_agent().contains("Safari/605.1.15"));
+            assert!(!config.browser_user_agent().contains("Chrome/"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert!(config.browser_user_agent().contains("Chrome/"));
+        let custom = AppConfig {
+            user_agent: "CustomBrowser/1.0".into(),
+            ..config
+        };
+        assert_eq!(custom.browser_user_agent(), "CustomBrowser/1.0");
+        for version in ["26.1", "17.1.2", "18"] {
+            assert!(valid_safari_version(version));
+        }
+        for version in [
+            "",
+            "26..1",
+            "26.1\r\nInjected: value",
+            "Safari/26",
+            "1234.1",
+        ] {
+            assert!(!valid_safari_version(version));
+        }
+    }
+
+    #[test]
     fn generic_defaults_and_partial_example_are_valid() {
         let mut defaults = AppConfig::default();
         defaults.validate().unwrap();
@@ -340,7 +416,8 @@ mod tests {
         let two = AppConfig::default().export_identity(None);
         assert_ne!(one.identifier, two.identifier);
         assert_ne!(one.profile_id, two.profile_id);
-        assert_ne!(one.identifier(), LEGACY_IDENTIFIER);
+        assert_ne!(one.identifier(), DEFAULT_IDENTIFIER);
+        assert!(one.identifier().starts_with("org.9h41.teams.generated."));
         let update = AppConfig::default().export_identity(Some(&one));
         assert_eq!(update.identifier, one.identifier);
         assert_eq!(update.profile_id, one.profile_id);

@@ -10,15 +10,21 @@ rust-version = "1.77.2"
 name = "msteams_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Private, opt-in diagnostic builds only. Normal distributable builds do not
+# load executable diagnostic probes from local Application Support storage.
+[features]
+avatar-probe = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "dynamic-acl"] }
+tauri = { version = "2", features = ["tray-icon", "dynamic-acl", "webview-data-url"] }
 tauri-plugin-opener = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 plist = "1"
 
@@ -35,14 +41,16 @@ glib = "0.18"
 # Native macOS Keychain API; session-cookie values never touch plaintext files.
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.11"
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSRunningApplication"] }
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSRunningApplication", "NSApplication", "NSDockTile"] }
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError", "NSURL"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError", "NSURL", "NSException", "NSObjCRuntime", "NSDictionary"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationContent", "UNNotificationSound", "UNNotificationSettings", "UNNotificationResponse"] }
 
 [profile.release]
-panic = "abort"
+# Wry/objc2 must unwind to catch cancelled WKURLSchemeTask exceptions.
+# panic=abort disables that catcher and turns normal cancellation into SIGABRT.
+panic = "unwind"
 codegen-units = 1
 lto = true
 opt-level = "s"

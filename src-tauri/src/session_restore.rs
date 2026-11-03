@@ -74,7 +74,17 @@ const MAX_AGE_SECONDS: u64 = 24 * 60 * 60;
 const MAX_BYTES: usize = 256 * 1024;
 const MAX_COOKIES: usize = 64;
 const STARTUP_WAIT: Duration = Duration::from_secs(120);
-pub const RESTORE_PAGE: &str = "restore.html";
+/// Keep the bootstrap self-contained. Navigating away while an asynchronous
+/// custom-protocol response is being delivered can raise a WKURLSchemeTask
+/// exception (didReceiveResponse:) on a background thread. A data document uses
+/// WebKit's own loader and needs no app IPC, remote resources or protocol task.
+pub fn restore_page_url() -> Url {
+    use base64::Engine;
+    let html =
+        base64::engine::general_purpose::STANDARD.encode(include_bytes!("../../dist/restore.html"));
+    Url::parse(&format!("data:text/html;charset=utf-8;base64,{html}"))
+        .expect("fixed embedded restore page is a valid data URL")
+}
 const CONTINUE_URL: &str = "tauri://localhost/session-restore-continue";
 const QUIT_WAIT: Duration = Duration::from_secs(5);
 const ITEM_NOT_FOUND: i32 = -25300;
@@ -408,11 +418,12 @@ impl SessionRestore {
     }
 
     pub fn is_restore_page(url: &Url) -> bool {
-        url.scheme() == "tauri"
-            && url.host_str() == Some("localhost")
-            && url.path() == "/restore.html"
-            && url.query().is_none()
-            && url.fragment().is_none()
+        (url.scheme() == "data" && url == &restore_page_url())
+            || (url.scheme() == "tauri"
+                && url.host_str() == Some("localhost")
+                && url.path() == "/restore.html"
+                && url.query().is_none()
+                && url.fragment().is_none())
     }
 
     /// Covers tray Quit and the custom application-menu/Cmd-Q action. A watchdog
@@ -659,11 +670,35 @@ mod tests {
     #[test]
     fn round_trip_preserves_session_and_security_attributes() {
         let cookie = session(".identity.example.com");
-        let bytes = encode(&[cookie.clone()], 100).unwrap().unwrap();
+        let bytes = encode(std::slice::from_ref(&cookie), 100).unwrap().unwrap();
         let restored = decode(&bytes, 101).unwrap();
         assert_eq!(restored[0].to_string(), cookie.to_string());
         assert!(restored[0].expires_datetime().is_none());
         assert!(restored[0].max_age().is_none());
+    }
+
+    #[test]
+    fn restore_bootstrap_does_not_create_a_custom_protocol_task() {
+        use base64::Engine;
+        let url = restore_page_url();
+        assert_eq!(url.scheme(), "data");
+        assert!(SessionRestore::is_restore_page(&url));
+        assert!(!SessionRestore::is_restore_page(
+            &Url::parse("data:text/html,unrelated").unwrap()
+        ));
+        let payload = url
+            .as_str()
+            .strip_prefix("data:text/html;charset=utf-8;base64,")
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(decoded, include_bytes!("../../dist/restore.html"));
+        let html = String::from_utf8(decoded).unwrap();
+        assert!(html.contains("tauri://localhost/session-restore-continue"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("src=\"http"));
+        assert!(!SessionRestore::is_continue_url(&url));
     }
 
     #[test]
@@ -770,7 +805,7 @@ mod tests {
     #[test]
     #[ignore = "uses the local macOS Keychain with a synthetic test entry"]
     fn native_keychain_round_trip() {
-        let service = "com.github.msteams.desktop.session-restore.tests";
+        let service = "org.9h41.teams.session-restore.tests";
         let account = format!("synthetic-{}-{}", std::process::id(), now());
         let synthetic = b"synthetic-session-test-not-a-real-token";
         set_generic_password(service, &account, synthetic).unwrap();

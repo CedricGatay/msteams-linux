@@ -9,11 +9,20 @@ if [[ $# != 0 || "$(uname -s)" != Darwin ]]; then
   echo "Usage (macOS): ./scripts/build-configurator.sh [--release]" >&2; exit 2
 fi
 cd "$ROOT"
-if [[ "$PROFILE" == debug ]]; then npm run tauri -- build --debug --bundles app
-else npm run tauri -- build --bundles app; fi
-python3 - "$ROOT" "$PROFILE" <<'PY'
+SIGNER="${MSTEAMS_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:--}}"
+export APPLE_SIGNING_IDENTITY="$SIGNER"
+SIGNING_CONFIG="$(python3 - "$SIGNER" <<'PY'
+import json,sys
+print(json.dumps({'bundle': {'macOS': {'signingIdentity': sys.argv[1]}}}))
+PY
+)"
+TAURI_ARGS=(build --bundles app --config "$SIGNING_CONFIG")
+if [[ "$PROFILE" == debug ]]; then TAURI_ARGS+=(--debug); fi
+npm run tauri -- "${TAURI_ARGS[@]}"
+python3 - "$ROOT" "$PROFILE" "$SIGNER" <<'PY'
 import json,pathlib,plistlib,shutil,subprocess,sys
-root=pathlib.Path(sys.argv[1]); profile=sys.argv[2]
+root=pathlib.Path(sys.argv[1]); profile=sys.argv[2]; signer=sys.argv[3]
+distribution=json.loads((root/'config/distribution.json').read_text())
 parent=root/'src-tauri/target'/profile/'bundle/macos'
 runtime=parent/'Microsoft Teams.app'; output=parent/'Teams Configurator.app'
 if (runtime/'Contents/Resources/runtime-config.json').exists():
@@ -27,9 +36,10 @@ resources=output/'Contents/Resources'; resources.mkdir(exist_ok=True)
 shutil.copytree(runtime,resources/'RuntimeTemplate.app')
 (resources/'configurator-mode.json').write_text(json.dumps({'mode':'configurator','version':1})+'\n')
 path=output/'Contents/Info.plist'
-info=plistlib.loads(path.read_bytes());info.update(CFBundleName='Teams Configurator',CFBundleDisplayName='Teams Configurator',CFBundleIdentifier='com.github.msteams.configurator')
+info=plistlib.loads(path.read_bytes());info.update(CFBundleName='Teams Configurator',CFBundleDisplayName='Teams Configurator',CFBundleIdentifier=distribution['configurator_identifier'])
 path.write_bytes(plistlib.dumps(info))
-subprocess.run(['/usr/bin/codesign','--force','--sign','-','--identifier',info['CFBundleIdentifier'],'--options','runtime','--timestamp=none','--entitlements',str(root/'src-tauri/Entitlements.plist'),str(output)],check=True)
+timestamp='--timestamp=none' if signer == '-' else '--timestamp'
+subprocess.run(['/usr/bin/codesign','--force','--sign',signer,'--identifier',info['CFBundleIdentifier'],'--options','runtime',timestamp,'--entitlements',str(root/'src-tauri/Entitlements.plist'),str(output)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(output)],check=True)
 print('Configurator ready:',output)
 PY

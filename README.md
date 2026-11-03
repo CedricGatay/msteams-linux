@@ -65,7 +65,7 @@ A minimal external file can override only what is needed:
 | `version` | Schema version, currently `1`. |
 | `name` | Display name, without paths or `.app` suffix. Editable in the UI. |
 | `teams_url` | Trusted HTTPS landing page, without credentials, query or fragment. |
-| `user_agent` | Browser identification; does not add Chromium features to WebKit. |
+| `user_agent` | `"auto"` (default): Safari/WebKit identification on macOS, desktop Chrome on other platforms. An explicit string overrides it. |
 | `trusted_host_suffixes` | Navigation suffix allowlist; generic Microsoft defaults apply when omitted. |
 | `trusted_auth_hosts` | Additional **exact HTTPS hosts**, not wildcard parent domains. |
 | `notification_origins` | Exact trusted HTTPS origins allowed to use native notification/media hooks. |
@@ -85,7 +85,9 @@ input file. When updating a previously generated app, the output app's existing
 bundle ID/profile UUID are retained. The exporter refuses unrelated apps,
 running generated apps and symlinked templates/targets. It stages, signs and
 verifies before replacement; a signing failure leaves the existing app intact.
-Quit a generated app before updating it. Use a new app for a different account
+Quit a generated app before updating it. To receive runtime features such as
+zoom or Dock badges, regenerate/update it using the newer configurator template;
+changing only its JSON does not update the executable. Use a new app for a different account
 or organization rather than sharing a profile.
 
 ### Runtime loading
@@ -111,10 +113,22 @@ packaged configurator uses a role marker, so no command-line option is needed.
 
 ## Signing and launching
 
+Bundles use the `org.9h41` namespace: `org.9h41.teams` for the runtime,
+`org.9h41.teams.configurator` for the configurator, and isolated generated IDs
+under `org.9h41.teams.generated`. Renaming creates a new macOS profile/permission
+namespace; old authentication is not silently copied.
+
 Local bundles are ad-hoc signed with matching `CFBundleIdentifier` and sealed
 `Info.plist`/resources. Camera/audio-input entitlements preserve media access under
 hardened runtime. Public distribution still requires the appropriate Developer ID
 signing and notarization; local ad-hoc signing is not notarization.
+
+For Developer ID signing and Apple notarization with the 9h41 account, see
+[the team-checked distribution workflow](docs/apple-distribution.md). It requires
+an installed 9h41 Developer ID Application certificate/private key and a
+notarytool Keychain profile. Development certificates and other teams' identities
+are deliberately rejected. Personalized configurator outputs remain locally
+ad-hoc signed; no developer credentials ship with them.
 
 Launch bundled apps through Finder or `open`, not their raw executables. For the
 original developer runtime:
@@ -134,6 +148,14 @@ switching builds.
 - External links open in the default browser; configured trusted sign-in hosts
   stay in the shared WebView profile.
 - Closing the main window hides the app to the tray; ⌘Q or tray Quit exits it.
+- **View → Zoom In / Zoom Out / Actual Size** controls the Teams page. Shortcuts:
+  ⌘+ (or ⌘=), ⌘− and ⌘0. Zoom uses 10-point steps from 50% to 200%, is saved
+  per app in `zoom.json`, and is reapplied on Teams navigation. The configurator
+  and sign-in pages stay at actual size. No arbitrary zoom value is accepted by
+  page IPC.
+- The unread count is synchronized between the menu-bar tray badge and the Dock
+  app icon, including `99+` overflow and clearing at zero. Each generated app
+  updates only its own Dock tile.
 - Native notifications use `UNUserNotificationCenter` under the actual bundle's
   identity. The first Teams page asks for OS authorization when undecided.
   **Send test notification** tests the native backend; click brings Teams forward.
@@ -188,6 +210,54 @@ exercises page IPC, unlike the native-only test. `MSTEAMS_NATIVE_FOREGROUND=1`
 enables the adapter for one run; `MSTEAMS_TEST_NOTIFICATION=1` sends a synthetic
 native test on launch. Normal launcher runs clear temporary diagnostic flags.
 Never direct private logs into the checkout.
+
+### macOS browser identification and profile photos
+
+The macOS runtime uses WebKit, not Chromium. With `user_agent: "auto"` it identifies
+as Safari, using the installed Safari version (17.1 fallback if system metadata
+is unavailable). This fixed a live case where Chrome identification produced
+only default avatars and photo requests returned 401, while Safari identification
+loaded the photos in the **same profile**, without weakening cookie/privacy
+settings. The exact upstream cookie/feature-detection mechanism is not proven.
+Custom user-agent strings are preserved; an older JSON explicitly advertising
+Chrome must remove that override or use `"auto"` with the updated runtime. Browser
+identification does not add engine features or bypass account policy.
+
+**Save avatar diagnostics (metadata only)** takes a manual, read-only snapshot of
+image/Fluent-avatar loaded, failed and pending counts, failed avatar URL-scheme
+buckets, and photo-request HTTP status buckets exposed by resource timing. Missing
+or cross-origin-hidden status is **unknown**, never treated as proof of a network
+failure. Worker-only requests or requests outside the bounded timing buffer may
+not appear. Only counts/booleans are written to `avatar-diagnostics.json` in that
+app's Application Support directory (owner-only permissions). No URLs, names,
+headers, cookies, tokens, pixels or image bodies are saved. It does not retry
+requests, change image loading or alter authentication. This is diagnostic
+instrumentation, not an avatar compatibility fix. The probe also reports the
+presence of the photo provider's base URL and its cookie-validity **boolean**;
+it never records the URL or cookie itself. React/provider discovery is bounded,
+uses only named photo-state keys, and does not invoke arbitrary getters or alter
+provider state.
+
+For native startup regressions on macOS, run:
+
+```bash
+cargo run --manifest-path src-tauri/Cargo.toml --release \
+  --features tauri/custom-protocol --example startup-smoke
+```
+
+This hidden, incognito smoke test verifies that a synthetic Objective-C exception
+is caught in **release mode** and that an embedded data document actually loads.
+It does not access a user profile or make network requests. macOS releases must
+use `panic = "unwind"`; `panic = "abort"` disables the Objective-C exception
+catching that WebKit URL-scheme cancellation relies on. The restoration bootstrap
+also requires Tauri's `webview-data-url` feature, enabled in `Cargo.toml`.
+
+For **private developer diagnosis only**, compiling with `--features avatar-probe`
+allows the manual action to load `avatar-diagnostics-probe.js` from that app's
+Application Support directory. This is executable local code: never enable this
+feature in distributed builds. The file must be a regular, non-symlink file with
+owner-only permissions, at most 64 KiB. Normal builds use only the compiled probe;
+all outputs still pass the fixed numeric/boolean schema before being saved.
 
 **Save session diagnostics** records allowed-host cookie lifetime counts and
 storage-key counts in private app storage, never authentication values. Native

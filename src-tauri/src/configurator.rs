@@ -47,7 +47,7 @@ pub fn prepare(context: &mut tauri::Context<tauri::Wry>) -> Launch {
     let actual_id = NSBundle::mainBundle()
         .bundleIdentifier()
         .map(|id| id.to_string())
-        .unwrap_or_else(|| configuration::LEGACY_IDENTIFIER.into());
+        .unwrap_or_else(|| configuration::DEFAULT_IDENTIFIER.into());
     if picker {
         context.config_mut().identifier = actual_id;
         context.config_mut().product_name = Some("Teams Configurator".into());
