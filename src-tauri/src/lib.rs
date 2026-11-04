@@ -32,6 +32,8 @@ mod dock_badge;
 #[cfg(target_os = "macos")]
 mod foreground_notifications;
 #[cfg(target_os = "macos")]
+mod menu_bar;
+#[cfg(target_os = "macos")]
 mod native_notifications;
 #[cfg(target_os = "macos")]
 mod notification_trace;
@@ -358,6 +360,15 @@ fn create_window<R: Runtime>(
                 });
             }
         });
+
+    // Tauri's native file-drop handler consumes macOS drops before WKWebView
+    // receives them. Let Teams handle user-selected File/DataTransfer objects
+    // through HTML5; no native paths, filesystem grant or custom upload bridge.
+    let builder = if matches!(kind, WindowKind::Main) {
+        builder.disable_drag_drop_handler()
+    } else {
+        builder
+    };
 
     // All windows must share the same persistent profile during SSO. Older
     // macOS versions fall back to WebKit's default persistent store.
@@ -702,6 +713,33 @@ fn update_tray<R: Runtime>(app: &AppHandle<R>, count: u32) {
     let _ = tray.set_tooltip(Some(tip));
 }
 
+#[cfg(target_os = "macos")]
+fn reload_main(app: &AppHandle) {
+    show_main(app);
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let current = window.url().ok();
+    // Do not interrupt an active Keychain restore or consume its snapshot twice.
+    if current
+        .as_ref()
+        .is_some_and(SessionRestore::is_restore_page)
+    {
+        return;
+    }
+    let result = if current.as_ref().is_some_and(is_notification_origin) {
+        window.reload()
+    } else {
+        // A post-login blank document needs the configured start page, not
+        // another reload of about:blank. No cookie/profile data is cleared.
+        window
+            .navigate(Url::parse(&configuration::current().teams_url).expect("validated start URL"))
+    };
+    if result.is_err() {
+        eprintln!("[msteams] could not reload Teams");
+    }
+}
+
 fn show_main<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -1002,7 +1040,7 @@ pub fn run() {
             // System tray: click to restore the window, right-click for the menu.
             let show_i =
                 MenuItem::with_id(app, "show", format!("Show {}", configuration::current().name), true, None::<&str>)?;
-            let hide_i = MenuItem::with_id(app, "hide", "Hide to tray", true, None::<&str>)?;
+            let hide_i = MenuItem::with_id(app, "hide", "Hide Window", true, None::<&str>)?;
             let media_i = MenuItem::with_id(
                 app,
                 "media-permissions",
@@ -1070,13 +1108,28 @@ pub fn run() {
                 item
             };
 
-            let mut tray = TrayIconBuilder::with_id("main")
-                .menu(&menu)
-                // The menu is for the right button: a left click restores the
-                // window (see `on_tray_icon_event` below).
-                .show_menu_on_left_click(false)
-                .tooltip(configuration::current().name.clone())
-                .on_menu_event(move |app, event| match event.id.as_ref() {
+            #[cfg(target_os = "macos")]
+            let tray_visibility_i = menu_bar::install(app.handle(), &menu, data_dir.clone())?;
+            #[cfg(target_os = "macos")]
+            let tray_visibility_event_i = tray_visibility_i.clone();
+
+            // Application-wide dispatch: Help commands remain usable even when
+            // the tray icon is hidden. Do not bind these actions to tray events.
+            app.on_menu_event(move |app, event| match event.id.as_ref() {
+                    #[cfg(target_os = "macos")]
+                    menu_bar::RELOAD_ID => reload_main(app),
+                    #[cfg(target_os = "macos")]
+                    menu_bar::TRAY_ID => {
+                        let state = app.state::<menu_bar::TrayVisibility>();
+                        let visible = tray_visibility_event_i.is_checked().unwrap_or(state.visible());
+                        if state.set_visible(visible, |visible| {
+                            app.tray_by_id("main").ok_or("Tray icon unavailable")?
+                                .set_visible(visible).map_err(|_| "Could not change tray visibility".into())
+                        }).is_err() {
+                            let _ = tray_visibility_event_i.set_checked(state.visible());
+                            eprintln!("[msteams] could not change tray visibility");
+                        }
+                    }
                     "show" => show_main(app),
                     "hide" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -1152,7 +1205,11 @@ pub fn run() {
                     }
                     "quit" => app.exit(0),
                     _ => {}
-                })
+                });
+
+            let tray = TrayIconBuilder::with_id("main")
+                .show_menu_on_left_click(false)
+                .tooltip(configuration::current().name.clone())
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -1163,10 +1220,25 @@ pub fn run() {
                         show_main(tray.app_handle());
                     }
                 });
+            // On macOS commands live in Help; the status item only restores
+            // the window. Other platforms keep the existing tray context menu.
+            #[cfg(not(target_os = "macos"))]
+            let tray = tray.menu(&menu);
+            let mut tray = tray;
             if let Some(icon) = app.default_window_icon().cloned() {
                 tray = tray.icon(icon);
             }
-            tray.build(app)?;
+            let tray = tray.build(app)?;
+            #[cfg(target_os = "macos")]
+            if tray.set_visible(app.state::<menu_bar::TrayVisibility>().visible()).is_err() {
+                // Optional icon visibility must not prevent startup.
+                let _ = tray.set_visible(true);
+                app.state::<menu_bar::TrayVisibility>().show_fallback();
+                let _ = tray_visibility_i.set_checked(true);
+                eprintln!("[msteams] using visible tray icon after visibility failure");
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = tray;
 
             let url = Url::parse(&configuration::current().teams_url).expect("validated start URL");
             let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
@@ -1206,10 +1278,26 @@ pub fn run() {
 
     app.run(|_app, event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-            if let Some(state) = _app.try_state::<SessionRestore>() {
-                state.on_exit(_app, &api, code.unwrap_or(0));
+        match event {
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                if let Some(state) = _app.try_state::<SessionRestore>() {
+                    state.on_exit(_app, &api, code.unwrap_or(0));
+                }
             }
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => {
+                // A hidden status item must never strand a closed/hidden app.
+                if _app.get_webview_window("main").is_some() {
+                    show_main(_app);
+                } else if let Some(window) = _app.get_webview_window("configurator") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+            _ => {}
         }
         #[cfg(not(target_os = "macos"))]
         let _ = event;

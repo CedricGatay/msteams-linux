@@ -77,7 +77,7 @@ preferable to matching private title/body strings.
 ## Implemented experimental foreground adapter
 
 `src-tauri/src/teams-foreground-adapter.js` implements the guarded adapter below.
-It is **off by default**; use the tray checkbox **Also show native notifications
+It is **off by default**; use the macOS **Help** menu checkbox **Also show native notifications
 while focused (experimental)**. Only the opt-in boolean is persisted, and it can
 be changed without restarting. `MSTEAMS_NATIVE_FOREGROUND=1` enables it for one
 launch through `scripts/run-macos.sh` without changing the saved preference.

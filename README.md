@@ -105,7 +105,7 @@ unintended remote page. Runtime identity must match the actual app bundle.
 The original shell retains its legacy profile when using its private settings;
 newly generated apps have independent bundle IDs, WebKit profiles, data directories
 and Keychain service/account namespaces. Updates preserve those namespaces.
-Per-app tray preferences override configuration defaults. **No authentication
+Per-app preferences (in the macOS **Help** menu) override configuration defaults. **No authentication
 cookies, accounts, browser profiles or Keychain entries are exported.**
 
 The same runtime can enter the local configurator with `--configure`. The
@@ -147,7 +147,26 @@ switching builds.
 
 - External links open in the default browser; configured trusted sign-in hosts
   stay in the shared WebView profile.
-- Closing the main window hides the app to the tray; ⌘Q or tray Quit exits it.
+- Closing the main window hides it; the Dock icon or **Help → Show** restores it.
+  ⌘Q, the application-menu Quit action, or **Help → Quit** exits cleanly.
+- **View → Reload Teams (⌘R)** refreshes the Teams webview without restarting the
+  process or clearing cookies/profile data. A blank document returns to the
+  configured Teams start page; an active Keychain restoration is not interrupted.
+  As with browser reload, unsaved page state may be reset.
+- On macOS, the former tray commands now live in **Help** (window visibility,
+  media permissions, notification tests, restoration preferences and diagnostics).
+  The tray icon only restores the window when clicked. Other platforms retain
+  their tray context menu.
+- **View → Show Tray Icon** toggles the optional menu-bar status icon. This is
+  remembered per app in `tray-visible.json` (default: visible). Help commands and
+  Dock reopening continue to work when the icon is hidden; the Dock unread badge
+  is independent of tray visibility.
+- File drops in the main Teams window use WebKit's HTML5 `File`/`DataTransfer`
+  handling instead of Tauri's native drop interception. Drop onto Teams' chat
+  composer/drop zone; Teams controls upload, confirmation and tenant restrictions.
+  The wrapper does not upload files itself or grant webpage filesystem access.
+  Existing generated apps need a runtime update from a newer configurator;
+  changing the JSON alone cannot change this native behavior.
 - **View → Zoom In / Zoom Out / Actual Size** controls the Teams page. Shortcuts:
   ⌘+ (or ⌘=), ⌘− and ⌘0. Zoom uses 10-point steps from 50% to 200%, is saved
   per app in `zoom.json`, and is reapplied on Teams navigation. The configurator
@@ -170,7 +189,7 @@ switching builds.
   close/cancellation and error cleanup remain unchanged. Internal service lookup
   is guarded and falls back safely after incompatible Teams updates.
 - Camera/microphone are requested separately on Teams load, with immediate stream
-  shutdown and no recording. The tray **Enable microphone and camera** retries.
+  shutdown and no recording. **Help → Enable microphone and camera** retries.
   OS privacy decisions still apply; screen capture is never requested on startup.
 
 If a notification is accepted but no banner appears, check macOS Notifications,
@@ -182,7 +201,7 @@ see [source investigation and adapter details](docs/teams-notification-integrati
 ### Session restoration
 
 Enable **Restore session on restart (Keychain)** or set its configuration default.
-On clean tray/application-menu/⌘Q exit, only allowed Secure session cookies are
+On clean Help/application-menu/⌘Q exit, only allowed Secure session cookies are
 saved in macOS Keychain. Startup shows a local restoration screen and allows up
 to two minutes for approval, with **Continue without restoring** available.
 Late/cancelled reads do not consume an unused snapshot; quitting during approval
@@ -205,7 +224,8 @@ MSTEAMS_NOTIFICATION_TRACE=1 MSTEAMS_LOG_FILE=/tmp/teams-trace.log ./scripts/run
 
 This records fixed stage names, permission values, focus/visibility, counters,
 hook status and bounded event histories—not titles, bodies, DOM text, IDs,
-worker URLs or storage values. The trace-only **Send web-bridge test notification**
+worker URLs or storage values. Diagnostic actions are in **Help** on macOS.
+The trace-only **Send web-bridge test notification**
 exercises page IPC, unlike the native-only test. `MSTEAMS_NATIVE_FOREGROUND=1`
 enables the adapter for one run; `MSTEAMS_TEST_NOTIFICATION=1` sends a synthetic
 native test on launch. Normal launcher runs clear temporary diagnostic flags.
@@ -246,7 +266,8 @@ cargo run --manifest-path src-tauri/Cargo.toml --release \
 ```
 
 This hidden, incognito smoke test verifies that a synthetic Objective-C exception
-is caught in **release mode** and that an embedded data document actually loads.
+is caught in **release mode**, that native Help/View controls are constructed, and
+that an embedded data document actually loads and reloads.
 It does not access a user profile or make network requests. macOS releases must
 use `panic = "unwind"`; `panic = "abort"` disables the Objective-C exception
 catching that WebKit URL-scheme cancellation relies on. The restoration bootstrap
