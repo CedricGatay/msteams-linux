@@ -4,8 +4,9 @@ An unofficial [Tauri v2](https://tauri.app) shell for the Microsoft Teams web
 client, with native notifications, media permissions, tray integration and
 optional Keychain-backed session restoration.
 
-**The configurator creates independent, fully bundled macOS `.app` applications
-from a JSON file. End users do not need Rust, Node, Python or this checkout.**
+**The configurator is the only macOS release download. It creates independent,
+fully bundled Teams `.app` applications from JSON. End users do not need Rust,
+Node, Python or this checkout. No standalone Teams app is distributed.**
 
 Not affiliated with or supported by Microsoft. Configuration files choose which
 websites receive native integrations: use only configurations you trust.
@@ -21,9 +22,14 @@ npm ci
 open "src-tauri/target/debug/bundle/macos/Teams Configurator.app"
 ```
 
-Use `./scripts/build-configurator.sh --release` for release artifacts. The build
-produces a generic runtime plus a configurator containing a copy of that runtime
-as `Contents/Resources/RuntimeTemplate.app`.
+Use `./scripts/build-configurator.sh --release` for a release build. The runtime
+is only a build intermediate: it is copied into the configurator as
+`Contents/Resources/RuntimeTemplate.app`, then the standalone intermediate is
+removed. Generated Teams apps are created exclusively through the configurator.
+
+For the signed/notarized release, follow [the distribution workflow](docs/apple-distribution.md).
+Its managed output directory contains only `Teams Configurator.zip`, `SHA256SUMS`
+and `release.json`; the manifest records the source commit and architecture.
 
 The configurator opens the native **Open configuration file** panel immediately.
 Cancelling leaves a usable screen with a retry button. Select a valid file, enter
@@ -130,18 +136,10 @@ notarytool Keychain profile. Development certificates and other teams' identitie
 are deliberately rejected. Personalized configurator outputs remain locally
 ad-hoc signed; no developer credentials ship with them.
 
-Launch bundled apps through Finder or `open`, not their raw executables. For the
-original developer runtime:
-
-```bash
-npm run tauri -- build --debug --bundles app
-./scripts/run-macos.sh
-```
-
-The launcher verifies the signature and uses Launch Services. Set
-`MSTEAMS_BUILD_PROFILE=release` to use the release bundle. It never force-quits or
-rebuilds an active app. Quit via the application's **Quit / ⌘Q** action before
-switching builds.
+Launch the configurator and generated apps through Finder or `open`, not their
+raw executables. Quit a generated app via **Quit / ⌘Q** before updating it. The
+build refuses to overwrite an active build-output bundle; it never force-quits
+apps or copies authentication data into the template.
 
 ## Desktop features
 
@@ -273,12 +271,8 @@ use `panic = "unwind"`; `panic = "abort"` disables the Objective-C exception
 catching that WebKit URL-scheme cancellation relies on. The restoration bootstrap
 also requires Tauri's `webview-data-url` feature, enabled in `Cargo.toml`.
 
-For **private developer diagnosis only**, compiling with `--features avatar-probe`
-allows the manual action to load `avatar-diagnostics-probe.js` from that app's
-Application Support directory. This is executable local code: never enable this
-feature in distributed builds. The file must be a regular, non-symlink file with
-owner-only permissions, at most 64 KiB. Normal builds use only the compiled probe;
-all outputs still pass the fixed numeric/boolean schema before being saved.
+Only the compiled, read-only diagnostic runs. Experimental local-script loading
+and one-off authenticated photo probes have been removed.
 
 **Save session diagnostics** records allowed-host cookie lifetime counts and
 storage-key counts in private app storage, never authentication values. Native
@@ -301,5 +295,6 @@ metadata and exits before network, media or Keychain access.
 Only generic configuration belongs here. User-specific settings live outside
 this checkout and are not compiled into public templates. Existing local history
 was sanitized to remove organization-specific references; old commit IDs changed.
-No remote push/force-push was performed. Avoid merging an unsanitized old branch
-back into this history. Private migration backups are outside the repository.
+The sanitized history is published to [the personal fork](https://github.com/CedricGatay/msteams-linux).
+Avoid merging an unsanitized old branch back into it. Private configuration,
+authentication data and migration backups remain outside the repository.

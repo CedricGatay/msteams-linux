@@ -10,11 +10,6 @@ rust-version = "1.77.2"
 name = "msteams_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
-# Private, opt-in diagnostic builds only. Normal distributable builds do not
-# load executable diagnostic probes from local Application Support storage.
-[features]
-avatar-probe = []
-
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

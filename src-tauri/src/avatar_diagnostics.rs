@@ -54,33 +54,6 @@ struct Counts {
     image_decoder_available: bool,
 }
 
-#[cfg(feature = "avatar-probe")]
-fn private_probe(path: &std::path::Path) -> Option<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > 65536 || metadata.permissions().mode() & 0o077 != 0 {
-        return None;
-    }
-    let source = std::fs::read_to_string(path).ok()?;
-    (source.len() <= 65536).then_some(source)
-}
-
-fn script<R: Runtime>(window: &WebviewWindow<R>) -> String {
-    // Deliberately unavailable in normal builds. Private probes live outside
-    // both the checkout and signed bundle, and are explicitly local executable
-    // code for developer diagnosis, not a configurable production feature.
-    #[cfg(feature = "avatar-probe")]
-    {
-        if let Ok(directory) = window.app_handle().path().app_data_dir() {
-            if let Some(source) = private_probe(&directory.join("avatar-diagnostics-probe.js")) {
-                return source;
-            }
-        }
-    }
-    let _ = window;
-    include_str!("avatar-diagnostics.js").into()
-}
-
 /// Best effort; cannot gate navigation/exit or modify page/network behavior.
 pub fn snapshot<R: Runtime>(window: &WebviewWindow<R>) {
     if window.label() != "main"
@@ -91,7 +64,7 @@ pub fn snapshot<R: Runtime>(window: &WebviewWindow<R>) {
         return;
     }
     let handle = window.app_handle().clone();
-    let result = window.eval_with_callback(script(window), move |raw| {
+    let result = window.eval_with_callback(include_str!("avatar-diagnostics.js"), move |raw| {
         let Ok(counts) = serde_json::from_str::<Counts>(&raw) else {
             eprintln!("[msteams] avatar metadata unavailable");
             return;
@@ -132,27 +105,6 @@ pub fn snapshot<R: Runtime>(window: &WebviewWindow<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "avatar-probe")]
-    #[test]
-    fn private_probe_rejects_shared_files_symlinks_and_oversized_sources() {
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        let root = std::env::temp_dir().join(format!("avatar-probe-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        let path = root.join("probe.js");
-        std::fs::write(&path, "({})").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(private_probe(&path).as_deref(), Some("({})"));
-        let link = root.join("link.js");
-        symlink(&path, &link).unwrap();
-        assert!(private_probe(&link).is_none());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(private_probe(&path).is_none());
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        std::fs::write(&path, " ".repeat(65537)).unwrap();
-        assert!(private_probe(&path).is_none());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn diagnostics_only_accept_known_counts_and_booleans() {
         let mut data = serde_json::to_value(Counts::default()).unwrap();

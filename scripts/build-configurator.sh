@@ -9,6 +9,14 @@ if [[ $# != 0 || "$(uname -s)" != Darwin ]]; then
   echo "Usage (macOS): ./scripts/build-configurator.sh [--release]" >&2; exit 2
 fi
 cd "$ROOT"
+python3 - "$ROOT" "$PROFILE" <<'PY'
+import pathlib,subprocess,sys
+parent=pathlib.Path(sys.argv[1])/'src-tauri/target'/sys.argv[2]/'bundle/macos'
+commands=subprocess.check_output(['ps','-axo','command='],text=True).splitlines()
+for name in ['Microsoft Teams.app','Teams Configurator.app']:
+ if any(line.strip().startswith(str(parent/name)+'/Contents/MacOS/') for line in commands):
+  raise SystemExit('Quit the build-output app before rebuilding it')
+PY
 SIGNER="${MSTEAMS_SIGNING_IDENTITY:-${APPLE_SIGNING_IDENTITY:--}}"
 export APPLE_SIGNING_IDENTITY="$SIGNER"
 SIGNING_CONFIG="$(python3 - "$SIGNER" <<'PY'
@@ -41,5 +49,8 @@ path.write_bytes(plistlib.dumps(info))
 timestamp='--timestamp=none' if signer == '-' else '--timestamp'
 subprocess.run(['/usr/bin/codesign','--force','--sign',signer,'--identifier',info['CFBundleIdentifier'],'--options','runtime',timestamp,'--entitlements',str(root/'src-tauri/Entitlements.plist'),str(output)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(output)],check=True)
+# The runtime is a build intermediate, not a second distributable. Its complete
+# copy remains sealed inside the configurator for generating independent apps.
+shutil.rmtree(runtime)
 print('Configurator ready:',output)
 PY

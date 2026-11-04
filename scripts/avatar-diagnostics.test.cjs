@@ -20,6 +20,11 @@ function snapshot({images = [], entries = [], origin = 'https://teams.cloud.micr
     document: {querySelectorAll: selector => selector === 'img' ? images : [{}, {}], getElementById: () => reactRoot},
     performance: {getEntriesByType() {if (!timing) throw Error('unavailable'); return entries;}}});
 }
+test('native diagnostics only run the compiled read-only snapshot, never a local script loader', () => {
+  const native = fs.readFileSync(path.join(__dirname, '../src-tauri/src/avatar_diagnostics.rs'), 'utf8');
+  assert.match(native, /eval_with_callback\(\s*include_str!\("avatar-diagnostics\.js"\)/);
+  assert.doesNotMatch(native, /fn private_probe|read_to_string|avatar-diagnostics-probe/);
+});
 test('distinguishes avatar load failures, pending images, placeholders and unrelated images', () => {
   const result = snapshot({images: [image('https://example.com/private-photo'),
     image('blob:https://teams.cloud.microsoft/private-id', {width: 0}),

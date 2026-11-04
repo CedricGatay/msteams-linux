@@ -3,7 +3,7 @@
 ## Ownership and identities
 
 - Developer team: `P222GS5YTA` (9h41).
-- Runtime bundle: `org.9h41.teams`.
+- Embedded runtime template: `org.9h41.teams` (not a separate download).
 - Configurator bundle: `org.9h41.teams.configurator`.
 - New personalized apps: `org.9h41.teams.generated.app<random UUID>`.
 
@@ -57,24 +57,29 @@ The profile name is a reference, not a credential value.
 python3 scripts/notarize-macos.py --profile "9h41-notary"
 ```
 
-The workflow:
+Build from a clean, committed checkout. The workflow:
 
 1. Fails before build/upload if the correct Developer ID identity is missing.
-2. Builds release runtime and configurator with the same selected identity.
-   The embedded runtime template is signed before the outer configurator.
-3. Verifies all three bundle signatures, expected bundle IDs, expected team,
-   Developer ID authority, hardened runtime and secure timestamps.
-4. Zips the two public bundles using `ditto`, submits each through `notarytool`
-   using only the Keychain profile, and requires `Accepted` status.
-5. Staples and validates each ticket, checks Gatekeeper assessment and rechecks
-   signing identity after stapling.
-6. Writes final stapled distribution ZIPs under
-   `src-tauri/target/release/bundle/distribution/`.
+2. Builds a generic runtime intermediate, embeds its signed copy in the
+   configurator, signs the outer bundle, then removes the standalone intermediate.
+3. Verifies the embedded template and outer configurator signatures, bundle IDs,
+   expected team, Developer ID authority, hardened runtime and secure timestamps.
+4. Submits **only Teams Configurator.app** through `notarytool`, using only the
+   Keychain profile, and requires `Accepted` status.
+5. Staples and validates its ticket, checks Gatekeeper, and rechecks both signed
+   bundles. Personalized Teams apps are generated later by the configurator.
+6. Atomically replaces the managed directory
+   `src-tauri/target/release/bundle/distribution/` with **Teams Configurator.zip**,
+   `SHA256SUMS` and `release.json`. The manifest records version, source commit,
+   architecture, signing team and notarization ID. No standalone Teams ZIP remains.
+   Failure before publication preserves the previous distribution.
 
-Submission receipts/logs are kept in a private temporary directory outside the
-checkout. Rejected or incomplete notarization is a failure, never reported as
-successful. The tool does not disable Gatekeeper, change Keychain trust, or make
-an unsupported claim that local ad-hoc builds are notarized.
+Accepted receipts are retained with owner-only permissions outside the checkout,
+in `~/Library/Application Support/org.9h41.teams/distribution-receipts/`. Successful
+submission scratch directories are deleted. Rejected submissions retain their
+private diagnostic reports; they are failures, never reported as successful.
+The tool does not disable Gatekeeper, change Keychain trust, or claim that local
+ad-hoc builds are notarized.
 
 For a Developer-ID-signed build without submission:
 
