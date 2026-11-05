@@ -1,4 +1,5 @@
-//! Opt-in, macOS-only session restoration. Secret payloads live only in Keychain.
+//! Configurable macOS session restoration, enabled by default for new apps.
+//! Secret payloads live only in Keychain.
 //! No cookie is made persistent or given a new expiry. Server revocation still applies.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -820,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn opt_in_defaults_off_and_only_boolean_preference_is_persisted() {
+    fn defaults_on_but_saved_opt_out_wins_and_only_boolean_is_persisted() {
         let dir = std::env::temp_dir().join(format!(
             "msteams-restore-test-{}-{}",
             std::process::id(),
@@ -830,7 +831,13 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let state = SessionRestore::new(dir.clone(), super::super::WEBKIT_PROFILE_ID);
+        let profile = *uuid::Uuid::new_v4().as_bytes();
+        let state = SessionRestore::new(dir.clone(), profile);
+        assert!(state.enabled());
+        // Model an existing explicit opt-out without accessing/deleting any
+        // Keychain entries in this ordinary preference-only unit test.
+        std::fs::write(&state.0.preference, "false").unwrap();
+        let state = SessionRestore::new(dir.clone(), profile);
         assert!(!state.enabled());
         state.set_enabled(true).unwrap();
         assert!(state.enabled());
@@ -838,7 +845,7 @@ mod tests {
             std::fs::read_to_string(&state.0.preference).unwrap(),
             "true"
         );
-        assert!(SessionRestore::new(dir.clone(), super::super::WEBKIT_PROFILE_ID).enabled());
+        assert!(SessionRestore::new(dir.clone(), profile).enabled());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

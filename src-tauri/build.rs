@@ -7,6 +7,7 @@ fn main() {
             "close_notification",
             "foreground_notifications_enabled",
             "zoom_teams",
+            "media_permission_status",
             "configurator_status",
             "configurator_open_file",
             "configurator_export",

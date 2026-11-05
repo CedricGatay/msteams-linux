@@ -76,7 +76,7 @@ A minimal external file can override only what is needed:
 | `trusted_auth_hosts` | Additional **exact HTTPS hosts**, not wildcard parent domains. |
 | `notification_origins` | Exact trusted HTTPS origins allowed to use native notification/media hooks. |
 | `session_cookie_hosts` | Exact trusted hosts whose Secure session cookies may be restored. |
-| `restore_session` | Default opt-in for Keychain session restoration; default `false`. |
+| `restore_session` | Keychain session restoration; default `true`. Set `false` to opt out. Saved per-app preferences take priority. |
 | `native_foreground` | Default opt-in for the experimental Teams foreground adapter; default `false`. |
 
 Unknown fields, oversized files, malformed hosts, wildcard host entries, URL
@@ -186,9 +186,21 @@ apps or copies authentication data into the template.
   close; macOS owns dismissal, with bounded callback retention. Normal browser
   close/cancellation and error cleanup remain unchanged. Internal service lookup
   is guarded and falls back safely after incompatible Teams updates.
-- Camera/microphone are requested separately on Teams load, with immediate stream
-  shutdown and no recording. **Help → Enable microphone and camera** retries.
-  OS privacy decisions still apply; screen capture is never requested on startup.
+- Camera/microphone checks wait until the Teams main area and navigation chrome
+  are rendered, then settle briefly. No wrapper permission request or device
+  capture happens automatically on launch/navigation. After a read-only browser
+  Permissions API/macOS AVFoundation check, a non-modal **Teams Shell** bar appears
+  only if access is needed or unknown. **Enable access** requests only the missing
+  permissions, separately, and immediately stops returned tracks. **Not now**
+  dismisses the bar for the document; **Help → Enable microphone and camera**
+  reopens it without capturing. Already-authorized users see no automatic bar.
+  Denied/restricted access shows settings guidance rather than repeated capture.
+  The bar is keyboard/screen-reader accessible, does not steal focus and uses no
+  remote assets. If a future Teams layout is not recognized within two minutes,
+  automatic readiness watching stops safely; Help remains the explicit fallback.
+  No cached request is treated as a grant. Teams can still activate devices for
+  its own previews/calls. OS privacy decisions apply; screen capture is never
+  requested automatically.
 
 If a notification is accepted but no banner appears, check macOS Notifications,
 alert style and Focus. API rejection from the native test shows a domain/code
@@ -198,7 +210,10 @@ see [source investigation and adapter details](docs/teams-notification-integrati
 
 ### Session restoration
 
-Enable **Restore session on restart (Keychain)** or set its configuration default.
+**Restore session on restart (Keychain)** is enabled by default for new apps.
+Use its **Help** checkbox or `restore_session: false` to opt out; an existing saved
+per-app opt-out is preserved. New apps still require their own first sign-in—no
+session is exported from the configurator/template.
 On clean Help/application-menu/⌘Q exit, only allowed Secure session cookies are
 saved in macOS Keychain. Startup shows a local restoration screen and allows up
 to two minutes for approval, with **Continue without restoring** available.

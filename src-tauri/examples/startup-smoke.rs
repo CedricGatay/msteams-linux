@@ -2,6 +2,10 @@
 //! creation/loading/reload and native menu wiring. Hidden, incognito, no
 //! network/credentials/user profile.
 #[cfg(target_os = "macos")]
+#[path = "../src/media_permissions.rs"]
+#[allow(dead_code)]
+mod media_permissions;
+#[cfg(target_os = "macos")]
 #[path = "../src/menu_bar.rs"]
 #[allow(dead_code)]
 mod menu_bar;
@@ -41,7 +45,17 @@ fn main() {
         let native: Retained<exception::Exception> = unsafe { Retained::cast_unchecked(native) };
         assert!(exception::catch(AssertUnwindSafe(|| exception::throw(native))).is_err());
     });
-    println!("startup-smoke: Objective-C exception caught in release mode");
+    println!(
+        "startup-smoke: Objective-C exception caught ({} mode)",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
+    let status = autoreleasepool(|_| media_permissions::status());
+    assert!(serde_json::to_value(status).unwrap().is_object());
+    println!("startup-smoke: read-only media authorization query completed (no capture)");
 
     let html = "<!doctype html><html><body data-smoke=\"ready\">Synthetic bootstrap</body></html>";
     let encoded = base64::engine::general_purpose::STANDARD.encode(html);

@@ -15,6 +15,6 @@
   "trusted_auth_hosts": [],
   "notification_origins": ["https://teams.cloud.microsoft", "https://teams.microsoft.com"],
   "session_cookie_hosts": ["login.microsoftonline.com", "teams.cloud.microsoft", "teams.microsoft.com"],
-  "restore_session": false,
+  "restore_session": true,
   "native_foreground": false
 }

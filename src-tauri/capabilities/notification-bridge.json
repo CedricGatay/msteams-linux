@@ -1,14 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "notification-bridge",
-  "description": "Bridge notifications only from the main Teams page, not authentication popups.",
+  "description": "Native notifications, zoom and read-only media permission status on the main Teams page, never authentication popups.",
   "windows": ["main"],
   "permissions": [
     "allow-show-notification",
     "allow-notification-permission",
     "allow-close-notification",
     "allow-foreground-notifications-enabled",
-    "allow-zoom-teams"
+    "allow-zoom-teams",
+    "allow-media-permission-status"
   ],
   "remote": {
     "urls": [

@@ -32,6 +32,8 @@ mod dock_badge;
 #[cfg(target_os = "macos")]
 mod foreground_notifications;
 #[cfg(target_os = "macos")]
+mod media_permissions;
+#[cfg(target_os = "macos")]
 mod menu_bar;
 #[cfg(target_os = "macos")]
 mod native_notifications;
@@ -391,7 +393,9 @@ fn create_window<R: Runtime>(
             ))
             .initialization_script(INJECT_JS);
         #[cfg(target_os = "macos")]
-        let builder = builder.initialization_script(include_str!("teams-foreground-adapter.js"));
+        let builder = builder
+            .initialization_script("window.__msteamsHasNativeMediaStatus = true;")
+            .initialization_script(include_str!("teams-foreground-adapter.js"));
         let builder = builder.initialization_script(include_str!("media-permissions.js"));
         #[cfg(target_os = "macos")]
         let builder = builder.initialization_script(include_str!("zoom-hotkeys.js"));
@@ -808,6 +812,13 @@ fn notification_payload(
     Ok((id, title, body.chars().take(4096).collect()))
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn media_permission_status(window: WebviewWindow) -> Result<media_permissions::Status, String> {
+    require_notification_window(&window)?;
+    Ok(media_permissions::status())
+}
+
 #[tauri::command]
 fn zoom_teams(app: AppHandle, window: WebviewWindow, action: String) -> Result<(), String> {
     require_notification_window(&window)?;
@@ -991,6 +1002,8 @@ pub fn run() {
             foreground_notifications_enabled,
             zoom_teams,
             #[cfg(target_os = "macos")]
+            media_permission_status,
+            #[cfg(target_os = "macos")]
             configurator::configurator_status,
             #[cfg(target_os = "macos")]
             configurator::configurator_open_file,
@@ -1009,7 +1022,7 @@ pub fn run() {
                 "windows": ["main"],
                 "local": false,
                 "remote": {"urls": configuration::current().notification_origins.iter().map(|origin| format!("{origin}/*")).collect::<Vec<_>>()},
-                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams"]
+                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams", "allow-media-permission-status"]
             });
             app.add_capability(capability.to_string().as_str())?;
 

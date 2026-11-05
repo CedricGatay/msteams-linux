@@ -386,7 +386,14 @@ mod tests {
     fn generic_defaults_and_partial_example_are_valid() {
         let mut defaults = AppConfig::default();
         defaults.validate().unwrap();
+        assert!(defaults.restore_session);
         let example = AppConfig::parse(include_bytes!("../../config/example.json")).unwrap();
+        assert!(example.restore_session);
+        assert!(
+            !AppConfig::parse(br#"{"restore_session":false}"#)
+                .unwrap()
+                .restore_session
+        );
         assert!(example.trusted(&Url::parse("https://login.example.com/").unwrap()));
         assert!(!example.trusted(&Url::parse("http://login.example.com/").unwrap()));
         assert!(!example.trusted(&Url::parse("https://login.example.com.evil.example/").unwrap()));
