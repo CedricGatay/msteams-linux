@@ -9,6 +9,10 @@ mod media_permissions;
 #[path = "../src/menu_bar.rs"]
 #[allow(dead_code)]
 mod menu_bar;
+#[cfg(target_os = "macos")]
+#[path = "../src/screen_presence.rs"]
+#[allow(dead_code)]
+mod screen_presence;
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -80,7 +84,16 @@ fn main() {
             let directory =
                 std::env::temp_dir().join(format!("teams-menu-smoke-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir(&directory)?;
-            let checkbox = menu_bar::install(app.handle(), &actions, directory)?;
+            let checkbox = menu_bar::install(app.handle(), &actions, directory.clone())?;
+            // Exercise native registration/query without connecting any Teams
+            // page or changing availability; callbacks are deliberately inert.
+            let presence = screen_presence::ScreenPresence::new(directory, |_| {});
+            presence.set_enabled(true).expect("Native screen/session observers unavailable");
+            assert!(presence.snapshot().enabled);
+            assert!(presence.snapshot().known, "Native console session was not recognized; check the public CGSession key spelling");
+            presence.set_enabled(false).unwrap();
+            assert!(!presence.snapshot().known);
+            println!("startup-smoke: screen/session observer registration and opt-out verified (no presence updates)");
             assert!(checkbox.is_checked()?);
             assert!(actions.items()?.is_empty());
             let root = app.menu().unwrap();

@@ -39,6 +39,8 @@ mod menu_bar;
 mod native_notifications;
 #[cfg(target_os = "macos")]
 mod notification_trace;
+#[cfg(target_os = "macos")]
+mod screen_presence;
 mod session_diagnostics;
 #[cfg(target_os = "macos")]
 mod session_restore;
@@ -398,7 +400,9 @@ fn create_window<R: Runtime>(
             .initialization_script(include_str!("teams-foreground-adapter.js"));
         let builder = builder.initialization_script(include_str!("media-permissions.js"));
         #[cfg(target_os = "macos")]
-        let builder = builder.initialization_script(include_str!("zoom-hotkeys.js"));
+        let builder = builder
+            .initialization_script(include_str!("zoom-hotkeys.js"))
+            .initialization_script(include_str!("screen-presence.js"));
         builder
     } else {
         builder
@@ -814,6 +818,16 @@ fn notification_payload(
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
+fn screen_presence_status(
+    app: AppHandle,
+    window: WebviewWindow,
+) -> Result<screen_presence::Snapshot, String> {
+    require_notification_window(&window)?;
+    Ok(app.state::<screen_presence::ScreenPresence>().snapshot())
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
 fn media_permission_status(window: WebviewWindow) -> Result<media_permissions::Status, String> {
     require_notification_window(&window)?;
     Ok(media_permissions::status())
@@ -1004,6 +1018,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             media_permission_status,
             #[cfg(target_os = "macos")]
+            screen_presence_status,
+            #[cfg(target_os = "macos")]
             configurator::configurator_status,
             #[cfg(target_os = "macos")]
             configurator::configurator_open_file,
@@ -1022,7 +1038,7 @@ pub fn run() {
                 "windows": ["main"],
                 "local": false,
                 "remote": {"urls": configuration::current().notification_origins.iter().map(|origin| format!("{origin}/*")).collect::<Vec<_>>()},
-                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams", "allow-media-permission-status"]
+                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams", "allow-media-permission-status", "allow-screen-presence-status"]
             });
             app.add_capability(capability.to_string().as_str())?;
 
@@ -1039,6 +1055,25 @@ pub fn run() {
                             let _ = window.eval(format!("if (window.__msteamsNotificationClick) window.__msteamsNotificationClick({id});"));
                         }
                     }
+                }));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                app.manage(screen_presence::ScreenPresence::new(data_dir.clone(), move |_event| {
+                    let dispatch = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        // Read the latest state at delivery, not a notification's
+                        // earlier snapshot: a queued event must not undo opt-out.
+                        let Some(state) = dispatch.try_state::<screen_presence::ScreenPresence>().map(|state| state.snapshot()) else { return; };
+                        if let Some(window) = dispatch.get_webview_window("main") {
+                            if window.url().is_ok_and(|url| is_notification_origin(&url)) {
+                                if let Ok(json) = serde_json::to_string(&state) {
+                                    let _ = window.eval(format!("if(window.__msteamsScreenPresence)window.__msteamsScreenPresence.receive({json});"));
+                                }
+                            }
+                        }
+                    });
                 }));
             }
             #[cfg(target_os = "macos")]
@@ -1122,6 +1157,14 @@ pub fn run() {
             };
 
             #[cfg(target_os = "macos")]
+            let screen_presence_i = {
+                let item = tauri::menu::CheckMenuItem::with_id(app, "screen-presence", "Keep online until screen saver / lock (experimental)", true,
+                    app.state::<screen_presence::ScreenPresence>().enabled(), None::<&str>)?;
+                let status = MenuItem::with_id(app, "screen-presence-diagnostics", "Presence prototype status", true, None::<&str>)?;
+                menu.insert_items(&[&item, &status], 4)?;
+                item
+            };
+            #[cfg(target_os = "macos")]
             let tray_visibility_i = menu_bar::install(app.handle(), &menu, data_dir.clone())?;
             #[cfg(target_os = "macos")]
             let tray_visibility_event_i = tray_visibility_i.clone();
@@ -1141,6 +1184,23 @@ pub fn run() {
                         }).is_err() {
                             let _ = tray_visibility_event_i.set_checked(state.visible());
                             eprintln!("[msteams] could not change tray visibility");
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    "screen-presence" => {
+                        let state = app.state::<screen_presence::ScreenPresence>();
+                        let enabled = screen_presence_i.is_checked().unwrap_or(state.enabled());
+                        if state.set_enabled(enabled).is_err() {
+                            let _ = screen_presence_i.set_checked(state.enabled());
+                            eprintln!("[msteams] could not enable native screen presence prototype");
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    "screen-presence-diagnostics" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.url().is_ok_and(|url| is_notification_origin(&url)) {
+                                screen_presence::show_diagnostics(&window);
+                            }
                         }
                     }
                     "show" => show_main(app),

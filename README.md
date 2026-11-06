@@ -208,6 +208,39 @@ error dialog without logging message contents. Teams' own settings preview uses
 an in-app toast command, and browser delivery can be suppressed while focused:
 see [source investigation and adapter details](docs/teams-notification-integration.md).
 
+### Screen-saver presence prototype (macOS, experimental)
+
+**Help → Keep online until screen saver / lock (experimental)** is enabled by
+default for apps without a saved preference. The Help checkbox can disable it;
+an existing per-app opt-out is preserved. Teams' own Safari idle-detection setting
+may still report unsupported; the shell supplies its own activity bridge. It
+supplies `Active` machine state while the
+macOS session is unlocked and the screen saver is off—even without mouse or
+keyboard input. Screen saver, lock, sleep or an inactive login session supplies
+inactive state. Unlocking/waking resumes normal activity reporting, but waking a
+still-locked session does not mark it active.
+
+This is not simulated input and does not keep the Mac awake, change the working
+Safari identification, spoof browser focus/permissions, or set a preferred
+Available/Away status. Teams' manual-status, meeting and call priorities remain
+responsible for the final availability. No new Graph credentials/scopes are used.
+Only a guarded, shape-checked internal host-state provider is adapted; disabling
+restores its original method and last authored state. Unknown/replaced providers
+or unknown native state fail closed.
+
+**Help → Presence prototype status** shows only bridge/native-state flags and an
+update count, never user identities, contacts, messages, tokens or preferences.
+For a real test, keep the option checked, leave Teams idle without input, then start the
+screen saver or lock the Mac. Check presence from a contact/another account;
+other active Teams sessions on the **same account** can keep aggregate presence
+online and mask this client's Away state. Updates can be delayed by Teams,
+network loss or OS sleep. Repeat with a manually selected
+status to verify it is not overridden. The macOS distributed screen-saver/lock
+notification names and Teams' internal provider are version-dependent, so this
+prototype is not yet a production guarantee. Turning it off returns to Teams'
+normal browser activity behavior. It never monitors keystrokes or captures the
+screen.
+
 ### Session restoration
 
 **Restore session on restart (Keychain)** is enabled by default for new apps.

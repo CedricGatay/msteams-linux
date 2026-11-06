@@ -37,9 +37,9 @@ glib = "0.18"
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "2.11"
 objc2 = { version = "0.6", features = ["exception"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSRunningApplication", "NSApplication", "NSDockTile"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSOpenPanel", "NSSavePanel", "NSRunningApplication", "NSApplication", "NSDockTile", "NSWorkspace"] }
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError", "NSURL", "NSException", "NSObjCRuntime", "NSDictionary"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSObject", "NSError", "NSURL", "NSException", "NSObjCRuntime", "NSDictionary", "NSValue", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "block2"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationContent", "UNNotificationSound", "UNNotificationSettings", "UNNotificationResponse"] }
 
 [profile.release]
