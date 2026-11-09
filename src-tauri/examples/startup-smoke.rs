@@ -1,5 +1,6 @@
 //! Native RELEASE smoke: actual Objective-C exception catching + data-document
-//! creation/loading/reload and native menu wiring. Hidden, incognito, no
+//! creation/loading/reload, related popup configuration and native menu wiring.
+//! Hidden, incognito, no
 //! network/credentials/user profile.
 #[cfg(target_os = "macos")]
 #[path = "../src/media_permissions.rs"]
@@ -18,8 +19,9 @@ mod screen_presence;
 fn main() {
     use base64::Engine;
     use objc2::{
-        exception,
+        exception, msg_send,
         rc::{autoreleasepool, Retained},
+        runtime::AnyObject,
     };
     use objc2_foundation::{NSException, NSString};
     use std::{
@@ -32,8 +34,18 @@ fn main() {
     };
     use tauri::{
         menu::{Menu, MenuItem, MenuItemKind, HELP_SUBMENU_ID},
+        webview::NewWindowResponse,
         Manager, WebviewUrl, WebviewWindowBuilder,
     };
+
+    // Both independent checks must complete before the test may exit successfully.
+    fn popup_check(app: &tauri::AppHandle, checks: &AtomicUsize, bit: usize, passed: bool) {
+        if !passed {
+            app.exit(1);
+        } else if checks.fetch_or(bit, Ordering::SeqCst) | bit == 3 {
+            app.exit(0);
+        }
+    }
 
     #[cfg(panic = "abort")]
     compile_error!("This release smoke requires panic=unwind, as does Wry's exception catcher");
@@ -114,10 +126,71 @@ fn main() {
             assert!(view.get(menu_bar::RELOAD_ID).is_some());
             assert!(view.get(menu_bar::TRAY_ID).is_some());
             println!("startup-smoke: native Help/View menu wiring verified");
+            let popup_app = app.handle().clone();
+            let popup_checks = Arc::new(AtomicUsize::new(0));
             WebviewWindowBuilder::new(app, "startup-smoke", WebviewUrl::External(url.clone()))
                 .incognito(true)
                 .disable_drag_drop_handler()
                 .visible(false)
+                .on_new_window(move |url, features| {
+                    if url.scheme() != "blob" {
+                        popup_app.exit(1);
+                        return NewWindowResponse::Deny;
+                    }
+                    let expected_store = unsafe {
+                        let store = features.opener().target_configuration.websiteDataStore();
+                        assert!(!store.isPersistent(), "Smoke must not use a persistent profile");
+                        Retained::as_ptr(&store) as usize
+                    };
+                    let checks = popup_checks.clone();
+                    let popup = WebviewWindowBuilder::new(
+                        &popup_app,
+                        "startup-popup-smoke",
+                        WebviewUrl::External("about:blank".parse().unwrap()),
+                    )
+                    // Same configuration hand-off as the production auth popup.
+                    // No new data-store identifier, incognito setting or navigation.
+                    .window_features(features)
+                    .visible(false)
+                    .on_page_load(move |window, payload| {
+                        if payload.event() != tauri::webview::PageLoadEvent::Finished
+                            || payload.url().scheme() != "blob"
+                        {
+                            return;
+                        }
+                        let handle = window.app_handle().clone();
+                        let checks = checks.clone();
+                        if window.eval_with_callback(
+                            "document.body.dataset.popupSmoke === 'ready' && !!window.opener && window.opener.document.body.dataset.smoke === 'ready'",
+                            move |raw| {
+                                let related = serde_json::from_str::<bool>(&raw).unwrap_or(false);
+                                println!("startup-smoke: popup original navigation and opener relationship={related}");
+                                popup_check(&handle, &checks, 2, related);
+                            },
+                        ).is_err() {
+                            window.app_handle().exit(1);
+                        }
+                    })
+                    .build();
+                    let Ok(popup) = popup else {
+                        popup_app.exit(1);
+                        return NewWindowResponse::Deny;
+                    };
+                    let checks = popup_checks.clone();
+                    let handle = popup_app.clone();
+                    if popup.with_webview(move |webview| unsafe {
+                        let view = &*webview.inner().cast::<AnyObject>();
+                        let config: Retained<AnyObject> = msg_send![view, configuration];
+                        let store: Retained<AnyObject> = msg_send![&*config, websiteDataStore];
+                        let shared = Retained::as_ptr(&store) as usize == expected_store;
+                        println!("startup-smoke: popup inherited exact incognito store={shared}");
+                        popup_check(&handle, &checks, 1, shared);
+                    }).is_err() {
+                        popup_app.exit(1);
+                        return NewWindowResponse::Deny;
+                    }
+                    NewWindowResponse::Create { window: popup }
+                })
                 .on_page_load(move |window, payload| {
                     if payload.event() != tauri::webview::PageLoadEvent::Finished {
                         return;
@@ -128,12 +201,19 @@ fn main() {
                         }
                         return;
                     }
-                    let handle = window.app_handle().clone();
+                    let parent = window.clone();
                     if window
                         .eval_with_callback("document.body.dataset.smoke === 'ready'", move |raw| {
                             let ready = serde_json::from_str::<bool>(&raw).unwrap_or(false);
                             println!("startup-smoke: data document loaded and reloaded={ready}");
-                            handle.exit(if ready { 0 } else { 1 });
+                            // A local blob proves WebKit loads the original request,
+                            // rather than merely showing our initial about:blank.
+                            if !ready || parent.eval(r#"
+                                const page = new Blob(['<!doctype html><body data-popup-smoke="ready">Synthetic popup</body>'], {type: 'text/html'});
+                                window.open(URL.createObjectURL(page), 'startup-popup-smoke');
+                            "#).is_err() {
+                                parent.app_handle().exit(1);
+                            }
                         })
                         .is_err()
                     {

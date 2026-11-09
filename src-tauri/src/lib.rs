@@ -59,7 +59,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    webview::{NewWindowResponse, PermissionKind, PermissionResponse},
+    webview::{NewWindowFeatures, NewWindowResponse, PermissionKind, PermissionResponse},
     AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 #[cfg(not(target_os = "macos"))]
@@ -306,6 +306,7 @@ fn create_window<R: Runtime>(
     url: Url,
     kind: WindowKind,
     data_dir: PathBuf,
+    features: Option<NewWindowFeatures>,
 ) -> tauri::Result<WebviewWindow<R>> {
     let nav_app = app.clone();
     let popup_app = app.clone();
@@ -374,10 +375,23 @@ fn create_window<R: Runtime>(
         builder
     };
 
-    // All windows must share the same persistent profile during SSO. Older
-    // macOS versions fall back to WebKit's default persistent store.
+    // WebKit requires a returned popup to use its supplied configuration,
+    // including the related opener and the exact website data store. Selecting
+    // the same profile UUID on a fresh configuration is NOT sufficient and can
+    // raise an Objective-C exception after this callback returns (macOS 15.1).
     #[cfg(target_os = "macos")]
-    let builder = builder.data_store_identifier(configuration::current().profile());
+    let builder = match kind {
+        WindowKind::Main => builder.data_store_identifier(configuration::current().profile()),
+        WindowKind::Popup => builder.window_features(features.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Authentication popup requires its native window configuration",
+            )
+        })?),
+    };
+    // Keep other platforms' existing cookie-policy and navigation setup.
+    #[cfg(not(target_os = "macos"))]
+    let _ = features;
 
     // Notification/capture hooks belong only to the main window, not auth popups.
     let builder = if matches!(kind, WindowKind::Main) {
@@ -436,7 +450,7 @@ fn create_window<R: Runtime>(
     let builder = builder
         // `window.open` / target="_blank": complete OAuth popups in-app, open
         // ordinary web links in the system browser.
-        .on_new_window(move |url, _features| {
+        .on_new_window(move |url, features| {
             log_navigation("popup", &url);
             if is_trusted(&url) {
                 let label = format!("auth-{}", WINDOW_SEQ.fetch_add(1, Ordering::Relaxed));
@@ -446,6 +460,7 @@ fn create_window<R: Runtime>(
                     url,
                     WindowKind::Popup,
                     popup_dir.clone(),
+                    Some(features),
                 ) {
                     Ok(window) => NewWindowResponse::Create { window },
                     Err(_) => NewWindowResponse::Deny,
@@ -474,10 +489,10 @@ fn create_window<R: Runtime>(
     // native APIs on a worker. An embedded loading page allows Keychain approval or
     // an explicit skip, with a bounded two-minute fallback.
     #[cfg(target_os = "macos")]
+    // WebKit owns the popup's original request after NewWindowResponse::Create;
+    // navigating it here would race/repeat the authentication request.
     if matches!(kind, WindowKind::Main) {
         app.state::<SessionRestore>().navigate(&window, url);
-    } else {
-        window.navigate(url)?;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1314,7 +1329,7 @@ pub fn run() {
             let _ = tray;
 
             let url = Url::parse(&configuration::current().teams_url).expect("validated start URL");
-            let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir)?;
+            let main = create_window(app.handle(), "main", url, WindowKind::Main, data_dir, None)?;
 
             #[cfg(target_os = "macos")]
             if std::env::var("MSTEAMS_TEST_NOTIFICATION").as_deref() == Ok("1") {

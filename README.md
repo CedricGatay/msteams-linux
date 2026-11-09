@@ -313,8 +313,13 @@ cargo run --manifest-path src-tauri/Cargo.toml --release \
 
 This hidden, incognito smoke test verifies that a synthetic Objective-C exception
 is caught in **release mode**, that native Help/View controls are constructed, and
-that an embedded data document actually loads and reloads.
-It does not access a user profile or make network requests. macOS releases must
+that an embedded data document actually loads and reloads. It also opens a
+memory-only popup and verifies that WebKit loads its original request, preserves
+its opener relationship, and uses the exact same incognito website data store.
+Authentication popups must inherit WebKit's supplied window configuration;
+selecting the same profile UUID on a fresh configuration is insufficient and can
+abort during SSO window creation on macOS 15.1.
+The smoke does not access a user profile or make network requests. macOS releases must
 use `panic = "unwind"`; `panic = "abort"` disables the Objective-C exception
 catching that WebKit URL-scheme cancellation relies on. The restoration bootstrap
 also requires Tauri's `webview-data-url` feature, enabled in `Cargo.toml`.
