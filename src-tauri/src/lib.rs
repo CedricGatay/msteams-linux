@@ -403,20 +403,37 @@ fn create_window<R: Runtime>(
         };
         let builder = builder
             .initialization_script(format!(
-                "window.__msteamsAllowedNotificationOrigins = {};",
+                "window.__msteamsAllowedNotificationOrigins = {}; window.__msteamsApplication = {}; window.__msteamsAppName = {};",
                 serde_json::to_string(&configuration::current().notification_origins)
-                    .expect("origins serialize")
+                    .expect("origins serialize"),
+                serde_json::to_string(&configuration::current().application)
+                    .expect("application serializes"),
+                serde_json::to_string(&configuration::current().name)
+                    .expect("name serializes")
             ))
             .initialization_script(INJECT_JS);
         #[cfg(target_os = "macos")]
-        let builder = builder
-            .initialization_script("window.__msteamsHasNativeMediaStatus = true;")
-            .initialization_script(include_str!("teams-foreground-adapter.js"));
-        let builder = builder.initialization_script(include_str!("media-permissions.js"));
+        let builder = if configuration::current().application == configuration::Application::Teams {
+            builder
+                .initialization_script("window.__msteamsHasNativeMediaStatus = true;")
+                .initialization_script(include_str!("teams-foreground-adapter.js"))
+        } else {
+            builder
+        };
+        let builder = if configuration::current().application == configuration::Application::Teams {
+            builder.initialization_script(include_str!("media-permissions.js"))
+        } else {
+            builder
+        };
         #[cfg(target_os = "macos")]
-        let builder = builder
-            .initialization_script(include_str!("zoom-hotkeys.js"))
-            .initialization_script(include_str!("screen-presence.js"));
+        let builder = {
+            let builder = builder.initialization_script(include_str!("zoom-hotkeys.js"));
+            if configuration::current().application == configuration::Application::Teams {
+                builder.initialization_script(include_str!("screen-presence.js"))
+            } else {
+                builder
+            }
+        };
         builder
     } else {
         builder
@@ -474,6 +491,9 @@ fn create_window<R: Runtime>(
 
     let window = match kind {
         WindowKind::Main => builder.inner_size(1280.0, 820.0).center().build(),
+        WindowKind::Popup if configuration::current().application.is_document_app() => {
+            builder.inner_size(1280.0, 820.0).center().build()
+        }
         WindowKind::Popup => builder.inner_size(520.0, 720.0).center().build(),
     }?;
 
@@ -729,9 +749,9 @@ fn update_tray<R: Runtime>(app: &AppHandle<R>, count: u32) {
         let _ = tray.set_icon(Some(render_badge(base, count)));
     }
     let tip = if count == 0 {
-        "Microsoft Teams".to_string()
+        configuration::current().name.clone()
     } else {
-        format!("Microsoft Teams — {count} unread")
+        format!("{} — {count} unread", configuration::current().name)
     };
     let _ = tray.set_tooltip(Some(tip));
 }
@@ -779,7 +799,9 @@ fn show_main<R: Runtime>(app: &AppHandle<R>) {
 /// main window keeps sign-in from littering the desktop.
 fn close_popups<R: Runtime>(app: &AppHandle<R>) {
     for (label, window) in app.webview_windows() {
-        if label.starts_with("auth-") {
+        if label.starts_with("auth-")
+            && configuration::current().disposable_popup(window.url().ok().as_ref())
+        {
             let _ = window.destroy();
         }
     }
@@ -787,11 +809,18 @@ fn close_popups<R: Runtime>(app: &AppHandle<R>) {
 
 /// Called from the injected script whenever the unread count changes.
 #[tauri::command]
-fn set_unread_count(app: AppHandle, unread: tauri::State<'_, Unread>, count: u32) {
+fn set_unread_count(
+    app: AppHandle,
+    window: WebviewWindow,
+    unread: tauri::State<'_, Unread>,
+    count: u32,
+) -> Result<(), String> {
+    require_notification_window(&window)?;
     unread.0.store(count, Ordering::Relaxed);
     update_tray(&app, count);
     #[cfg(target_os = "macos")]
     dock_badge::update(&app, count);
+    Ok(())
 }
 
 /// Called from the injected script to show a native notification for a web
@@ -804,7 +833,7 @@ fn require_notification_window(window: &WebviewWindow) -> Result<(), String> {
     if window.label() == "main" && window.url().is_ok_and(|url| is_notification_origin(&url)) {
         Ok(())
     } else {
-        Err("Notification access is limited to the main Teams page".into())
+        Err("Notification access is limited to the main application page".into())
     }
 }
 
@@ -824,11 +853,20 @@ fn notification_payload(
         return Err("Invalid notification identifier".into());
     }
     let title = if title.trim().is_empty() {
-        "Microsoft Teams".to_owned()
+        configuration::current().name.clone()
     } else {
         title.chars().take(512).collect()
     };
     Ok((id, title, body.chars().take(4096).collect()))
+}
+
+fn require_teams_window(window: &WebviewWindow) -> Result<(), String> {
+    require_notification_window(window)?;
+    if configuration::current().application == configuration::Application::Teams {
+        Ok(())
+    } else {
+        Err("This integration is available only in Teams".into())
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -837,14 +875,14 @@ fn screen_presence_status(
     app: AppHandle,
     window: WebviewWindow,
 ) -> Result<screen_presence::Snapshot, String> {
-    require_notification_window(&window)?;
+    require_teams_window(&window)?;
     Ok(app.state::<screen_presence::ScreenPresence>().snapshot())
 }
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
 fn media_permission_status(window: WebviewWindow) -> Result<media_permissions::Status, String> {
-    require_notification_window(&window)?;
+    require_teams_window(&window)?;
     Ok(media_permissions::status())
 }
 
@@ -865,7 +903,7 @@ fn zoom_teams(app: AppHandle, window: WebviewWindow, action: String) -> Result<(
 
 #[tauri::command]
 fn foreground_notifications_enabled(app: AppHandle, window: WebviewWindow) -> Result<bool, String> {
-    require_notification_window(&window)?;
+    require_teams_window(&window)?;
     #[cfg(target_os = "macos")]
     {
         Ok(app.state::<ForegroundNotifications>().enabled())
@@ -976,10 +1014,18 @@ fn send_test_notification(app: &AppHandle) {
     std::thread::spawn(move || {
         let result = native_notifications::permission(true).and_then(|permission| {
             if permission != "granted" {
-                return Err("Notifications are disabled. Enable Microsoft Teams in System Settings → Notifications.".into());
+                return Err(format!(
+                    "Notifications are disabled. Enable {} in System Settings → Notifications.",
+                    configuration::current().name
+                ));
             }
             let id = format!("test-{}", NOTIFICATION_SEQ.fetch_add(1, Ordering::Relaxed));
-            native_notifications::show(&id, "Microsoft Teams", "Native notification bridge is working. Click to open Teams.", false)
+            native_notifications::show(
+                &id,
+                &configuration::current().name,
+                "Native notification bridge is working. Click to open the app.",
+                false,
+            )
         });
         match result {
             Ok(()) => eprintln!("[msteams] test notification accepted: true"),
@@ -1053,7 +1099,7 @@ pub fn run() {
                 "windows": ["main"],
                 "local": false,
                 "remote": {"urls": configuration::current().notification_origins.iter().map(|origin| format!("{origin}/*")).collect::<Vec<_>>()},
-                "permissions": ["allow-show-notification", "allow-notification-permission", "allow-close-notification", "allow-foreground-notifications-enabled", "allow-set-unread-count", "allow-zoom-teams", "allow-media-permission-status", "allow-screen-presence-status"]
+                "permissions": configuration::current().application.remote_permissions()
             });
             app.add_capability(capability.to_string().as_str())?;
 
@@ -1073,7 +1119,7 @@ pub fn run() {
                 }));
             }
             #[cfg(target_os = "macos")]
-            {
+            if configuration::current().application == configuration::Application::Teams {
                 let handle = app.handle().clone();
                 app.manage(screen_presence::ScreenPresence::new(data_dir.clone(), move |_event| {
                     let dispatch = handle.clone();
@@ -1108,7 +1154,7 @@ pub fn run() {
                 app,
                 "media-permissions",
                 "Enable microphone and camera",
-                true,
+                configuration::current().application == configuration::Application::Teams,
                 None::<&str>,
             )?;
             let notification_i = MenuItem::with_id(
@@ -1165,7 +1211,7 @@ pub fn run() {
             let foreground_i = {
                 let item = tauri::menu::CheckMenuItem::with_id(
                     app, "foreground-native", "Also show native notifications while focused (experimental)",
-                    true, app.state::<ForegroundNotifications>().enabled(), None::<&str>,
+                    configuration::current().application == configuration::Application::Teams, app.state::<ForegroundNotifications>().enabled(), None::<&str>,
                 )?;
                 menu.insert(&item, 4)?;
                 item
@@ -1173,9 +1219,9 @@ pub fn run() {
 
             #[cfg(target_os = "macos")]
             let screen_presence_i = {
-                let item = tauri::menu::CheckMenuItem::with_id(app, "screen-presence", "Keep online until screen saver / lock (experimental)", true,
-                    app.state::<screen_presence::ScreenPresence>().enabled(), None::<&str>)?;
-                let status = MenuItem::with_id(app, "screen-presence-diagnostics", "Presence prototype status", true, None::<&str>)?;
+                let item = tauri::menu::CheckMenuItem::with_id(app, "screen-presence", "Keep online until screen saver / lock (experimental)", configuration::current().application == configuration::Application::Teams,
+                    app.try_state::<screen_presence::ScreenPresence>().is_some_and(|state| state.enabled()), None::<&str>)?;
+                let status = MenuItem::with_id(app, "screen-presence-diagnostics", "Presence prototype status", configuration::current().application == configuration::Application::Teams, None::<&str>)?;
                 menu.insert_items(&[&item, &status], 4)?;
                 item
             };
@@ -1203,7 +1249,7 @@ pub fn run() {
                     }
                     #[cfg(target_os = "macos")]
                     "screen-presence" => {
-                        let state = app.state::<screen_presence::ScreenPresence>();
+                        let Some(state) = app.try_state::<screen_presence::ScreenPresence>() else { return; };
                         let enabled = screen_presence_i.is_checked().unwrap_or(state.enabled());
                         if state.set_enabled(enabled).is_err() {
                             let _ = screen_presence_i.set_checked(state.enabled());
@@ -1546,6 +1592,29 @@ mod tests {
         let base = Image::new_owned([1, 2, 3, 255].repeat(16 * 16), 16, 16);
         let out = render_badge(&base, 0);
         assert_eq!(out.rgba(), base.rgba());
+    }
+
+    #[test]
+    fn every_service_badges_its_own_pristine_icon_and_caps_the_overflow_label() {
+        use configuration::Application;
+        for application in [
+            Application::Teams,
+            Application::Outlook,
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ] {
+            let base = configuration::icon_image(application.icon_png()).unwrap();
+            let original = base.rgba().to_vec();
+            let badged = render_badge(&base, 7);
+            assert_ne!(badged.rgba(), original.as_slice());
+            assert_eq!(base.rgba(), original.as_slice());
+            assert_eq!(render_badge(&base, 0).rgba(), original.as_slice());
+            assert_eq!(
+                render_badge(&base, 100).rgba(),
+                render_badge(&base, u32::MAX).rgba()
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Teams page notifications -> native OS notifications. No message contents in logs.
+// Configured page notifications -> native OS notifications. No message contents in logs.
 (function () {
   var allowedOrigins = window.__msteamsAllowedNotificationOrigins;
   var allowedPage = Array.isArray(allowedOrigins) ? allowedOrigins.includes(location.origin)
@@ -16,6 +16,11 @@
   var deliveryQueue = Promise.resolve();
   var sessionCount = 0;
   var titleCount = 0;
+  var serviceBadges = ["outlook", "word", "excel", "powerpoint"].includes(window.__msteamsApplication);
+  var appBadgeCount = null;
+  var badgeQueue = Promise.resolve();
+  var appName = window.__msteamsAppName || "Microsoft Teams";
+  var maxCount = 0xffffffff;
   var last = -1;
   var traceEnabled = window.__msteamsNotificationTraceEnabled === true;
   var trace = {window_calls: 0, service_worker_page_calls: 0, teams_foreground_calls: 0, send_attempts: 0,
@@ -33,7 +38,7 @@
     try { return Promise.resolve(window.__TAURI_INTERNALS__.invoke(command, args)); }
     catch (error) { return Promise.reject(error); }
   }
-  function warn() { console.warn("Teams native notification bridge operation failed"); }
+  function warn() { console.warn("Native notification bridge operation failed"); }
   function permissionInvoke(request) {
     return invoke("notification_permission", {request: request}).catch(function (error) {
       trace.permission_errors++;
@@ -68,15 +73,47 @@
   ready.catch(warn);
 
   function report() {
-    var count = Math.max(sessionCount, titleCount);
-    if (count === last) return;
+    // An alert is not an unread message count. Non-Teams services' Badge API
+    // is authoritative (including zero); otherwise use only the document title.
+    // Teams retains its existing notification/title fallback behavior.
+    var count = appBadgeCount !== null ? appBadgeCount : (serviceBadges ? titleCount : Math.max(sessionCount, titleCount));
+    if (count === last) return Promise.resolve();
     last = count;
-    invoke("set_unread_count", {count: count}).catch(warn);
+    return invoke("set_unread_count", {count: count}).catch(function (error) {
+      last = -1; // Allow a later title poll/API call to retry failed IPC.
+      throw error;
+    });
   }
   function scanTitle() {
-    var match = /^\(\s*(\d+)\s*\)/.exec(document.title || "");
-    var count = match ? parseInt(match[1], 10) : 0;
-    if (count !== titleCount) { titleCount = count; report(); }
+    var match = /^\(\s*(\d+)(\+)?\s*\)/.exec(document.title || "");
+    titleCount = match ? Math.min(maxCount, Number(match[1]) + (match[2] ? 1 : 0)) : 0;
+    report().catch(warn); // Also clear stale native badges after a navigation.
+  }
+  function applyBadge(count) {
+    // Preserve API invocation order, including setAppBadge(); clearAppBadge()
+    // in the same turn and native IPC that acknowledges out of order.
+    var operation = badgeQueue.catch(function () {}).then(function () {
+      appBadgeCount = count;
+      return report();
+    });
+    badgeQueue = operation;
+    return operation;
+  }
+  if (serviceBadges) {
+    try {
+      Object.defineProperties(navigator, {
+        setAppBadge: {configurable: true, value: function (count) {
+          if (count === undefined) count = 1; // Flag badge, without a count.
+          if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+            return Promise.reject(new TypeError("Badge count must be a non-negative safe integer"));
+          }
+          return applyBadge(Math.min(maxCount, count));
+        }},
+        clearAppBadge: {configurable: true, value: function () {
+          return applyBadge(0);
+        }}
+      });
+    } catch (_) { warn(); }
   }
   function forget(notification) {
     if (notifications.get(notification._id) === notification) notifications.delete(notification._id);
@@ -90,7 +127,7 @@
       else if (source === "teams_foreground") { trace.teams_foreground_calls++; mark("teams_foreground"); }
       else { trace.window_calls++; mark("window_notification"); }
       options = options || {};
-      this.title = String(title == null ? "Microsoft Teams" : title);
+      this.title = String(title == null ? appName : title);
       this.body = String(options.body == null ? "" : options.body);
       this.tag = String(options.tag || "");
       this.silent = options.silent === true;
@@ -152,7 +189,7 @@
           return;
         }
         sessionCount += 1;
-        report();
+        report().catch(warn);
         this._event("show");
       } catch (error) {
         trace.failed++;
@@ -276,7 +313,7 @@
   function focus() {
     mark("focus");
     sessionCount = 0;
-    report();
+    scanTitle();
     // Refresh after the user changes Allow Notifications in macOS settings.
     permissionInvoke(false).then(setPermission).catch(warn);
   }

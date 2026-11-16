@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "application": "outlook",
+  "name": "Microsoft Outlook",
+  "teams_url": "https://outlook.office.com/mail/",
+  "notification_origins": ["https://outlook.office.com", "https://outlook.office365.com", "https://outlook.live.com"],
+  "session_cookie_hosts": ["login.microsoftonline.com", "login.live.com", "outlook.office.com", "outlook.office365.com", "outlook.live.com"],
+  "native_foreground": false
+}

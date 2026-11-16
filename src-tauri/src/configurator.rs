@@ -1,7 +1,7 @@
 //! Local-only macOS configuration screen and native file panels.
 use crate::{
     app_export::{self, ExportedApp},
-    configuration::{self, AppConfig},
+    configuration::{self, AppConfig, Application},
 };
 use objc2_app_kit::{NSModalResponseOK, NSOpenPanel, NSSavePanel};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSURL};
@@ -38,6 +38,15 @@ fn bundle() -> PathBuf {
     PathBuf::from(NSBundle::mainBundle().bundlePath().to_string())
 }
 
+fn generator_context(context: &mut tauri::Context<tauri::Wry>) {
+    context.config_mut().product_name = Some("Microsoft Cloud App Generator".into());
+    context.package_info_mut().name = "Microsoft Cloud App Generator".into();
+    context.set_default_window_icon(Some(
+        configuration::icon_image(include_bytes!("../../dist/generator.png"))
+            .expect("valid built-in generator icon"),
+    ));
+}
+
 /// Resolve settings before Tauri derives paths/capabilities/identity from Context.
 pub fn prepare(context: &mut tauri::Context<tauri::Wry>) -> Launch {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -50,7 +59,7 @@ pub fn prepare(context: &mut tauri::Context<tauri::Wry>) -> Launch {
         .unwrap_or_else(|| configuration::DEFAULT_IDENTIFIER.into());
     if picker {
         context.config_mut().identifier = actual_id;
-        context.config_mut().product_name = Some("Teams Configurator".into());
+        generator_context(context);
         return Launch {
             configurator: true,
             error: None,
@@ -86,6 +95,10 @@ pub fn prepare(context: &mut tauri::Context<tauri::Wry>) -> Launch {
         context.config_mut().identifier = config.identifier().into();
         context.config_mut().product_name = Some(config.name.clone());
         context.package_info_mut().name = config.name.clone();
+        context.set_default_window_icon(Some(
+            configuration::icon_image(config.application.icon_png())
+                .map_err(|_| "Cannot load the application icon")?,
+        ));
         configuration::initialize(config)
     })();
     match loaded {
@@ -95,7 +108,7 @@ pub fn prepare(context: &mut tauri::Context<tauri::Wry>) -> Launch {
         },
         Err(error) => {
             context.config_mut().identifier = actual_id;
-            context.config_mut().product_name = Some("Teams Configurator".into());
+            generator_context(context);
             Launch {
                 configurator: true,
                 error: Some(error),
@@ -117,8 +130,8 @@ pub fn setup(app: &mut tauri::App, error: Option<String>) -> tauri::Result<()> {
         "configurator",
         WebviewUrl::App("configurator.html".into()),
     )
-    .title("Teams Configurator")
-    .inner_size(700.0, 620.0)
+    .title("Microsoft Cloud App Generator")
+    .inner_size(760.0, 780.0)
     .min_inner_size(560.0, 480.0)
     .center()
     .on_navigation(|url| url.scheme() == "tauri" && url.host_str() == Some("localhost"))
@@ -143,6 +156,7 @@ fn local(window: &WebviewWindow) -> Result<(), String> {
 
 #[derive(Serialize)]
 pub struct Selection {
+    application: Application,
     name: String,
     trusted_auth_host_count: usize,
     teams_url: String,
@@ -159,7 +173,7 @@ async fn native_panel(
             #[allow(deprecated)] // macOS 11 compatibility; file types are fixed, not user code.
             if let Some(name) = save_name {
                 let panel = NSSavePanel::savePanel(mtm);
-                panel.setTitle(Some(&NSString::from_str("Create standalone Teams app")));
+                panel.setTitle(Some(&NSString::from_str("Create standalone Microsoft app")));
                 panel.setCanCreateDirectories(true);
                 panel.setNameFieldStringValue(&NSString::from_str(&format!("{name}.app")));
                 panel.setAllowedFileTypes(Some(&NSArray::from_slice(&[&*NSString::from_str(
@@ -254,6 +268,7 @@ pub async fn configurator_open_file(
         };
         let config = AppConfig::read(&path)?;
         let selection = Selection {
+            application: config.application,
             name: config.name.clone(),
             teams_url: config.teams_url.clone(),
             trusted_auth_host_count: config.trusted_auth_hosts.len(),
@@ -274,6 +289,7 @@ pub async fn configurator_export(
     app: AppHandle,
     window: WebviewWindow,
     name: String,
+    application: Application,
 ) -> Result<Option<ExportedApp>, String> {
     local(&window)?;
     let state = app.state::<ConfiguratorState>();
@@ -288,7 +304,8 @@ pub async fn configurator_export(
             .as_ref()
             .ok_or("Open a valid configuration first")?
             .config
-            .clone();
+            .clone()
+            .for_application(application)?;
         config.name = name;
         config.validate()?;
         let Some(destination) = native_panel(&app, Some(config.name.clone())).await? else {

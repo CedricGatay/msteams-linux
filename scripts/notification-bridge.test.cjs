@@ -5,26 +5,31 @@ const fs = require('node:fs');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, '../src-tauri/src/notification-bridge.js'), 'utf8');
 
-function fixture({permission = 'granted', requestedPermission = 'granted', failDelivery = false, failPermission = false, host = 'teams.cloud.microsoft', frame = false, loaded = true, traceEnabled = false, workerControlled = false, deliveryDeferred = null} = {}) {
+function fixture({permission = 'granted', requestedPermission = 'granted', failDelivery = false, failPermission = false, host = 'teams.cloud.microsoft', frame = false, loaded = true, traceEnabled = false, workerControlled = false, deliveryDeferred = null, application = 'teams', allowedOrigins, title = 'Microsoft Teams', failBadge = false, badgeDelivery = null} = {}) {
   const calls = [], warnings = [], listeners = {}, intervals = [], observers = [], docListeners = {};
   const status = {permission, requestedPermission, focused: true};
   const window = {crypto: {randomUUID: () => 'fixture'}, addEventListener: (name, fn) => {listeners[name] = fn;}};
   window.top = frame ? {} : window;
   window.__msteamsNotificationTraceEnabled = traceEnabled;
+  window.__msteamsApplication = application;
+  window.__msteamsAppName = ({outlook: 'Microsoft Outlook', word: 'Microsoft Word', excel: 'Microsoft Excel', powerpoint: 'Microsoft PowerPoint'})[application] || 'Microsoft Teams';
+  window.__msteamsAllowedNotificationOrigins = allowedOrigins;
   window.__TAURI_INTERNALS__ = {invoke: async (command, args) => {
     calls.push({command, args});
     if (command === 'notification_permission') {
       if (failPermission) throw new Error('Synthetic private permission error');
       return args.request ? status.requestedPermission : status.permission;
     }
+    if (command === 'set_unread_count' && failBadge) throw new Error('badge IPC failed');
+    if (command === 'set_unread_count' && badgeDelivery) return badgeDelivery(args.count);
     if (command === 'show_notification' && failDelivery) throw new Error('delivery failed');
     if (command === 'show_notification' && deliveryDeferred) return deliveryDeferred;
   }};
-  const document = {title: 'Microsoft Teams', hidden: false, readyState: loaded ? 'complete' : 'loading',
+  const document = {title, hidden: false, readyState: loaded ? 'complete' : 'loading',
     head: {}, documentElement: {}, hasFocus: () => status.focused, querySelectorAll: () => [],
     addEventListener: (name, fn) => {docListeners[name] = fn;}};
   class ServiceWorkerRegistration {}
-  const context = vm.createContext({window, document, location: {hostname: host}, Event, EventTarget,
+  const context = vm.createContext({window, document, location: {hostname: host, origin: 'https://' + host}, Event, EventTarget,
     navigator: {serviceWorker: {controller: workerControlled ? {} : null}},
     ServiceWorkerRegistration, MutationObserver: class {constructor(callback) {observers.push(callback);} observe() {}},
     console: {warn: (...args) => warnings.push(args)},
@@ -240,6 +245,111 @@ test('focus resets notification-derived unread count and preserves title-derived
   f.intervals[0]();
   f.listeners.focus();
   assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 5);
+});
+
+function outlookFixture(options = {}) {
+  return fixture({application: 'outlook', host: 'outlook.office.com',
+    allowedOrigins: ['https://outlook.office.com'], title: 'Mail - Outlook', ...options});
+}
+
+test('Outlook badge API drives unread independently of notifications, title, focus and permission', async () => {
+  const f = outlookFixture({permission: 'denied'});
+  const navigator = f.context.navigator;
+  assert.equal(typeof navigator.setAppBadge, 'function');
+  await navigator.setAppBadge(42);
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 42);
+  f.document.title = '(3) Mail - Outlook';
+  f.listeners.focus();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 42);
+  await navigator.clearAppBadge();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+  f.intervals[0]();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+  await navigator.setAppBadge();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 1);
+  await navigator.setAppBadge(0);
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+});
+
+test('badge set/clear calls preserve invocation order within the same event-loop turn', async () => {
+  const f = outlookFixture();
+  const api = f.context.navigator;
+  await Promise.all([api.setAppBadge(5), api.clearAppBadge(), api.setAppBadge(9), api.setAppBadge(0)]);
+  assert.deepEqual(callsFor(f, 'set_unread_count').map(call => call.args.count), [5, 0, 9, 0]);
+});
+
+test('badge writes are serialized until native acknowledgement and recover after failure', async () => {
+  let rejectFirst;
+  const f = outlookFixture({badgeDelivery: count => count === 5 ? new Promise((_, reject) => {rejectFirst = reject;}) : undefined});
+  const first = f.context.navigator.setAppBadge(5);
+  const rejected = assert.rejects(first, /synthetic failure/);
+  const cleared = f.context.navigator.clearAppBadge();
+  await settle();
+  assert.deepEqual(callsFor(f, 'set_unread_count').map(call => call.args.count), [5]);
+  rejectFirst(new Error('synthetic failure'));
+  await rejected;
+  await cleared;
+  assert.deepEqual(callsFor(f, 'set_unread_count').map(call => call.args.count), [5, 0]);
+});
+
+test('Outlook badge API validates input, bounds large counts and propagates IPC failures', async () => {
+  const f = outlookFixture();
+  for (const value of [-1, 1.5, NaN, Infinity, '3', null, Number.MAX_SAFE_INTEGER + 1]) {
+    await assert.rejects(f.context.navigator.setAppBadge(value), {name: 'TypeError'});
+  }
+  assert.equal(callsFor(f, 'set_unread_count').length, 0);
+  await f.context.navigator.setAppBadge(Number.MAX_SAFE_INTEGER);
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0xffffffff);
+  const failed = outlookFixture({failBadge: true});
+  await assert.rejects(failed.context.navigator.setAppBadge(4), /badge IPC failed/);
+  await assert.rejects(failed.context.navigator.setAppBadge(4), /badge IPC failed/);
+  assert.equal(callsFor(failed, 'set_unread_count').length, 2);
+});
+
+test('Outlook title fallback clears stale badges and tracks real counts without notification inflation', async () => {
+  const f = outlookFixture();
+  f.intervals[0]();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+  f.document.title = '(8) Inbox - Outlook';
+  f.intervals[0]();
+  await new f.window.Notification(null, {tag: 'mail'})._delivery;
+  await new f.window.Notification('Replacement', {tag: 'mail'})._delivery;
+  assert.equal(callsFor(f, 'show_notification')[0].args.title, 'Microsoft Outlook');
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 8);
+  f.listeners.focus();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 8);
+  f.document.title = '(99+) Inbox - Outlook';
+  f.intervals[0]();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 100);
+  f.document.title = 'Mail - Outlook';
+  f.intervals[0]();
+  assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+});
+
+test('Office document apps share Badge API support without treating alerts as unread documents', async () => {
+  for (const application of ['word', 'excel', 'powerpoint']) {
+    const host = application + '.cloud.microsoft';
+    const f = fixture({application, host, allowedOrigins: ['https://' + host], title: 'Document editor'});
+    await new f.window.Notification('Collaboration alert')._delivery;
+    assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+    await f.context.navigator.setAppBadge(6);
+    f.listeners.focus();
+    assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 6);
+    await f.context.navigator.clearAppBadge();
+    assert.equal(callsFor(f, 'set_unread_count').at(-1).args.count, 0);
+  }
+});
+
+test('Outlook badge hooks never install on sign-in pages, unconfigured origins or subframes', async () => {
+  for (const options of [{host: 'login.microsoftonline.com'}, {host: 'outlook.office.com.evil.example'}, {frame: true}]) {
+    const f = outlookFixture(options);
+    await settle();
+    assert.equal(f.window.Notification, undefined);
+    assert.equal(f.context.navigator.setAppBadge, undefined);
+    assert.equal(f.calls.length, 0);
+  }
+  const teams = fixture();
+  assert.equal(teams.context.navigator.setAppBadge, undefined);
 });
 
 test('refreshes native permission when returning from macOS settings', async () => {

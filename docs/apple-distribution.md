@@ -1,11 +1,15 @@
-# 9h41 macOS distribution
+# Microsoft Cloud App Generator — 9h41 macOS distribution
 
 ## Ownership and identities
 
 - Developer team: `P222GS5YTA` (9h41).
 - Embedded runtime template: `org.9h41.teams` (not a separate download).
 - Configurator bundle: `org.9h41.teams.configurator`.
-- New personalized apps: `org.9h41.teams.generated.app<random UUID>`.
+- New personalized apps: `org.9h41.<service>.generated.app<random UUID>`, where
+  service is `teams`, `outlook`, `word`, `excel` or `powerpoint`.
+
+The generator retains its original bundle ID despite the display-name change,
+so its preferences and OS permissions remain associated with the same identity.
 
 Public ownership metadata lives in `config/distribution.json`. Certificates,
 private keys, Apple IDs, app-specific passwords and App Store Connect API keys
@@ -64,12 +68,12 @@ Build from a clean, committed checkout. The workflow:
    configurator, signs the outer bundle, then removes the standalone intermediate.
 3. Verifies the embedded template and outer configurator signatures, bundle IDs,
    expected team, Developer ID authority, hardened runtime and secure timestamps.
-4. Submits **only Teams Configurator.app** through `notarytool`, using only the
+4. Submits **only Microsoft Cloud App Generator.app** through `notarytool`, using only the
    Keychain profile, and requires `Accepted` status.
 5. Staples and validates its ticket, checks Gatekeeper, and rechecks both signed
-   bundles. Personalized Teams apps are generated later by the configurator.
+   bundles. Personalized Microsoft cloud apps are generated later by the generator.
 6. Atomically replaces the managed directory
-   `src-tauri/target/release/bundle/distribution/` with **Teams Configurator.zip**,
+   `src-tauri/target/release/bundle/distribution/` with **Microsoft Cloud App Generator.zip**,
    `SHA256SUMS` and `release.json`. The manifest records version, source commit,
    architecture, signing team and notarization ID. No standalone Teams ZIP remains.
    Failure before publication preserves the previous distribution.

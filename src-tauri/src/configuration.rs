@@ -15,11 +15,88 @@ pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const DEFAULT_JSON: &str = include_str!("../../config/default.json");
 static CURRENT: OnceLock<AppConfig> = OnceLock::new();
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Application {
+    #[default]
+    Teams,
+    Outlook,
+    Word,
+    Excel,
+    Powerpoint,
+}
+
+impl Application {
+    fn preset_json(self) -> Option<&'static str> {
+        match self {
+            Self::Teams => None,
+            Self::Outlook => Some(include_str!("../../config/outlook.json")),
+            Self::Word => Some(include_str!("../../config/word.json")),
+            Self::Excel => Some(include_str!("../../config/excel.json")),
+            Self::Powerpoint => Some(include_str!("../../config/powerpoint.json")),
+        }
+    }
+
+    pub fn remote_permissions(self) -> Vec<&'static str> {
+        let mut permissions = vec![
+            "allow-show-notification",
+            "allow-notification-permission",
+            "allow-close-notification",
+            "allow-set-unread-count",
+            "allow-zoom-teams",
+        ];
+        if self == Self::Teams {
+            permissions.extend([
+                "allow-foreground-notifications-enabled",
+                "allow-media-permission-status",
+                "allow-screen-presence-status",
+            ]);
+        }
+        permissions
+    }
+
+    pub fn is_document_app(self) -> bool {
+        matches!(self, Self::Word | Self::Excel | Self::Powerpoint)
+    }
+
+    pub fn icon_png(self) -> &'static [u8] {
+        match self {
+            Self::Teams => include_bytes!("../../dist/services/teams.png"),
+            Self::Outlook => include_bytes!("../../dist/services/outlook.png"),
+            Self::Word => include_bytes!("../../dist/services/word.png"),
+            Self::Excel => include_bytes!("../../dist/services/excel.png"),
+            Self::Powerpoint => include_bytes!("../../dist/services/powerpoint.png"),
+        }
+    }
+
+    pub fn icon_icns(self) -> &'static [u8] {
+        match self {
+            Self::Teams => include_bytes!("../icons/icon.icns"),
+            Self::Outlook => include_bytes!("../icons/outlook/icon.icns"),
+            Self::Word => include_bytes!("../icons/word/icon.icns"),
+            Self::Excel => include_bytes!("../icons/excel/icon.icns"),
+            Self::Powerpoint => include_bytes!("../icons/powerpoint/icon.icns"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Teams => "Teams",
+            Self::Outlook => "Outlook",
+            Self::Word => "Word",
+            Self::Excel => "Excel",
+            Self::Powerpoint => "PowerPoint",
+        }
+    }
+}
+
 // No Debug: a user configuration can contain private organization details.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u8,
+    #[serde(default)]
+    pub application: Application,
     pub name: String,
     pub teams_url: String,
     pub user_agent: String,
@@ -79,6 +156,28 @@ fn valid_safari_version(version: &str) -> bool {
         })
 }
 
+/// Decode only our fixed-size RGBA assets without enabling Tauri's optional
+/// image stack (whose latest release requires a newer Rust toolchain).
+pub fn icon_image(bytes: &[u8]) -> Result<tauri::image::Image<'static>, String> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|_| "Invalid built-in PNG icon")?;
+    let info = reader.info();
+    if info.width != 128
+        || info.height != 128
+        || info.color_type != png::ColorType::Rgba
+        || info.bit_depth != png::BitDepth::Eight
+    {
+        return Err("Built-in icons must be 128-pixel RGBA PNGs".into());
+    }
+    let mut rgba = vec![0; 128 * 128 * 4];
+    reader
+        .next_frame(&mut rgba)
+        .map_err(|_| "Cannot decode built-in PNG icon")?;
+    Ok(tauri::image::Image::new_owned(rgba, 128, 128))
+}
+
 pub fn current() -> &'static AppConfig {
     CURRENT.get_or_init(AppConfig::default)
 }
@@ -128,6 +227,22 @@ impl AppConfig {
             .ok_or("Configuration must be a JSON object")?;
         let mut merged: serde_json::Value =
             serde_json::from_str(DEFAULT_JSON).expect("valid defaults");
+        let application: Application = object
+            .get("application")
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|_| "Application must be teams, outlook, word, excel or powerpoint")?
+            .unwrap_or_default();
+        if let Some(json) = application.preset_json() {
+            let preset: serde_json::Value =
+                serde_json::from_str(json).expect("valid application preset");
+            for (key, value) in preset.as_object().unwrap() {
+                merged
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(key.clone(), value.clone());
+            }
+        }
         // Identity is not inherited by files: a generator assigns it on export.
         merged.as_object_mut().unwrap().remove("identifier");
         merged.as_object_mut().unwrap().remove("profile_id");
@@ -191,7 +306,7 @@ impl AppConfig {
             hosts.sort();
             hosts.dedup();
         }
-        let url = Url::parse(&self.teams_url).map_err(|_| "Invalid Teams URL")?;
+        let url = Url::parse(&self.teams_url).map_err(|_| "Invalid application URL")?;
         if url.scheme() != "https"
             || !url.username().is_empty()
             || url.password().is_some()
@@ -199,10 +314,12 @@ impl AppConfig {
             || url.fragment().is_some()
             || url.host_str().is_none()
         {
-            return Err("Teams URL must use HTTPS without credentials, query or fragment".into());
+            return Err(
+                "Application URL must use HTTPS without credentials, query or fragment".into(),
+            );
         }
         if !self.trusted(&url) {
-            return Err("Teams URL must belong to a configured trusted host".into());
+            return Err("Application URL must belong to a configured trusted host".into());
         }
         self.teams_url = url.to_string();
         if self.notification_origins.is_empty() || self.notification_origins.len() > 16 {
@@ -249,6 +366,55 @@ impl AppConfig {
         Ok(())
     }
 
+    /// Switching the export target keeps organization authentication settings,
+    /// but replaces service-specific defaults. The selected input stays intact.
+    pub fn for_application(mut self, application: Application) -> Result<Self, String> {
+        if self.application == application {
+            return Ok(self);
+        }
+        let old = Self::parse(
+            &serde_json::to_vec(&serde_json::json!({
+                "application": self.application
+            }))
+            .unwrap(),
+        )?;
+        let preset = Self::parse(
+            &serde_json::to_vec(&serde_json::json!({
+                "application": application
+            }))
+            .unwrap(),
+        )?;
+        self.session_cookie_hosts
+            .retain(|host| !old.session_cookie_hosts.contains(host));
+        self.session_cookie_hosts
+            .extend(preset.session_cookie_hosts);
+        // Do not reintroduce the broad built-in navigation suffix allowlist
+        // when an organization deliberately restricted its input config. Add
+        // only exact HTTPS hosts required by the target service instead.
+        for host in std::iter::once(preset.teams_url.as_str())
+            .chain(preset.notification_origins.iter().map(String::as_str))
+            .filter_map(|value| Url::parse(value).ok())
+            .filter_map(|url| url.host_str().map(str::to_owned))
+            .chain(self.session_cookie_hosts.iter().cloned())
+            .collect::<Vec<_>>()
+        {
+            let url = Url::parse(&format!("https://{host}/")).expect("validated host");
+            if !self.trusted(&url) {
+                self.trusted_auth_hosts.push(host);
+            }
+        }
+        self.application = application;
+        self.teams_url = preset.teams_url;
+        self.notification_origins = preset.notification_origins;
+        self.native_foreground = false;
+        // Preserve a personalized name, replacing only the built-in name.
+        if self.name == old.name {
+            self.name = preset.name;
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Explicit overrides remain exact. Automatic macOS identification matches
     /// WebKit/Safari rather than advertising unsupported Chromium behavior.
     pub fn browser_user_agent(&self) -> &str {
@@ -283,6 +449,26 @@ impl AppConfig {
                 .iter()
                 .any(|suffix| host == suffix || host.ends_with(&format!(".{suffix}")))
     }
+    /// Office editors open real documents in related windows. Do not treat
+    /// those as disposable OAuth windows just because the main window focuses.
+    pub fn disposable_popup(&self, url: Option<&Url>) -> bool {
+        if !self.application.is_document_app() {
+            return true;
+        }
+        // A related editor may still be bootstrapping on about:blank. Only
+        // known authentication hosts are safe to discard automatically.
+        let Some(url) = url else {
+            return false;
+        };
+        let Some(host) = url.host_str() else {
+            return false;
+        };
+        self.trusted_auth_hosts.iter().any(|auth| auth == host)
+            || host == "login.live.com"
+            || host == "microsoftonline.com"
+            || host.ends_with(".microsoftonline.com")
+    }
+
     pub fn cookie_host_allowed(&self, domain: &str) -> bool {
         let host = domain.strip_prefix('.').unwrap_or(domain);
         self.session_cookie_hosts
@@ -313,7 +499,8 @@ impl AppConfig {
             self.profile_id = old.profile_id.clone();
         } else {
             self.identifier = Some(format!(
-                "org.9h41.teams.generated.app{}",
+                "org.9h41.{}.generated.app{}",
+                self.application.label().to_ascii_lowercase(),
                 uuid::Uuid::new_v4().simple()
             ));
             self.profile_id = Some(uuid::Uuid::new_v4().to_string());
@@ -429,6 +616,206 @@ mod tests {
         assert_eq!(update.identifier, one.identifier);
         assert_eq!(update.profile_id, one.profile_id);
     }
+    #[test]
+    fn outlook_defaults_overrides_and_legacy_configs_are_valid() {
+        let outlook = AppConfig::parse(br#"{"application":"outlook"}"#).unwrap();
+        assert!(outlook.application == Application::Outlook);
+        assert_eq!(outlook.name, "Microsoft Outlook");
+        assert_eq!(outlook.teams_url, "https://outlook.office.com/mail/");
+        for origin in [
+            "https://outlook.office.com/",
+            "https://outlook.office365.com/",
+            "https://outlook.live.com/",
+        ] {
+            assert!(outlook.notification_origin(&Url::parse(origin).unwrap()));
+        }
+        assert!(
+            !outlook.notification_origin(&Url::parse("https://teams.cloud.microsoft/").unwrap())
+        );
+        assert!(!outlook
+            .notification_origin(&Url::parse("https://outlook.office.com.evil.example/").unwrap()));
+        assert!(outlook.cookie_host_allowed("outlook.office.com"));
+        assert!(!outlook.native_foreground);
+        let teams = AppConfig::parse(br#"{}"#).unwrap();
+        assert!(teams.application == Application::Teams);
+        assert_eq!(teams.teams_url, AppConfig::default().teams_url);
+        let custom = AppConfig::parse(br#"{"application":"outlook","name":"Personal Mail","teams_url":"https://outlook.live.com/mail/"}"#).unwrap();
+        assert_eq!(custom.name, "Personal Mail");
+        assert_eq!(custom.teams_url, "https://outlook.live.com/mail/");
+        assert!(AppConfig::parse(br#"{"application":"unknown"}"#).is_err());
+        assert!(AppConfig::parse(include_bytes!("../../config/outlook.json")).is_ok());
+    }
+
+    #[test]
+    fn document_services_have_valid_presets_icons_and_isolated_identities() {
+        let mut identities = std::collections::HashSet::new();
+        let mut profiles = std::collections::HashSet::new();
+        for application in [
+            Application::Teams,
+            Application::Outlook,
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ] {
+            let input =
+                serde_json::to_vec(&serde_json::json!({"application": application})).unwrap();
+            let config = AppConfig::parse(&input).unwrap();
+            assert_eq!(config.name, format!("Microsoft {}", application.label()));
+            assert!(config.trusted(&Url::parse(&config.teams_url).unwrap()));
+            assert!(config.notification_origin(&Url::parse(&config.teams_url).unwrap()));
+            assert!(!config.native_foreground);
+            let icon = icon_image(application.icon_png()).unwrap();
+            assert_eq!((icon.width(), icon.height()), (128, 128));
+            assert!(application.icon_icns().starts_with(b"icns"));
+            let generated = config.clone().export_identity(None);
+            assert!(identities.insert(generated.identifier().to_owned()));
+            assert!(profiles.insert(generated.profile_id.clone()));
+            let round_trip = AppConfig::parse(&serde_json::to_vec(&generated).unwrap()).unwrap();
+            assert!(round_trip.application == application);
+            assert_eq!(round_trip.teams_url, config.teams_url);
+            for destination in [
+                Application::Teams,
+                Application::Outlook,
+                Application::Word,
+                Application::Excel,
+                Application::Powerpoint,
+            ] {
+                let mut personalized = config.clone();
+                personalized
+                    .trusted_auth_hosts
+                    .push("login.example.com".into());
+                personalized
+                    .session_cookie_hosts
+                    .push("login.example.com".into());
+                let switched = personalized.for_application(destination).unwrap();
+                assert!(switched.application == destination);
+                assert!(switched.cookie_host_allowed("login.example.com"));
+                assert!(switched.trusted(&Url::parse("https://login.example.com/").unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn office_document_popups_survive_main_focus_but_auth_popups_remain_disposable() {
+        for application in [
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ] {
+            let mut config = AppConfig::default().for_application(application).unwrap();
+            config.trusted_auth_hosts.push("login.example.com".into());
+            for target in [
+                "https://word-edit.officeapps.live.com/edit",
+                "https://example.sharepoint.com/document",
+                "https://excel.cloud.microsoft/",
+                "https://powerpoint.cloud.microsoft/",
+            ] {
+                assert!(!config.disposable_popup(Some(&Url::parse(target).unwrap())));
+            }
+            for target in [
+                "https://login.microsoftonline.com/",
+                "https://login.live.com/",
+                "https://login.example.com/",
+            ] {
+                assert!(config.disposable_popup(Some(&Url::parse(target).unwrap())));
+            }
+            assert!(!config.disposable_popup(None));
+            assert!(!config.disposable_popup(Some(&Url::parse("about:blank").unwrap())));
+        }
+        assert!(AppConfig::default()
+            .disposable_popup(Some(&Url::parse("https://teams.cloud.microsoft/").unwrap())));
+    }
+
+    #[test]
+    fn only_teams_receives_presence_and_media_inspection_permissions() {
+        for application in [
+            Application::Teams,
+            Application::Outlook,
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ] {
+            let permissions = application.remote_permissions();
+            assert!(permissions.contains(&"allow-set-unread-count"));
+            assert!(permissions.contains(&"allow-zoom-teams"));
+            for restricted in [
+                "allow-foreground-notifications-enabled",
+                "allow-media-permission-status",
+                "allow-screen-presence-status",
+            ] {
+                assert_eq!(
+                    permissions.contains(&restricted),
+                    application == Application::Teams
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn switching_services_preserves_restricted_navigation_allowlists() {
+        let config = AppConfig::parse(
+            br#"{
+            "trusted_host_suffixes": ["teams.cloud.microsoft"],
+            "trusted_auth_hosts": ["login.example.com"],
+            "notification_origins": ["https://teams.cloud.microsoft"],
+            "session_cookie_hosts": ["login.example.com", "teams.cloud.microsoft"]
+        }"#,
+        )
+        .unwrap();
+        for application in [
+            Application::Outlook,
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ] {
+            let switched = config.clone().for_application(application).unwrap();
+            assert_eq!(switched.trusted_host_suffixes, config.trusted_host_suffixes);
+            assert!(switched.trusted(&Url::parse(&switched.teams_url).unwrap()));
+            assert!(switched.trusted(&Url::parse("https://login.example.com/").unwrap()));
+            assert!(!switched.trusted(&Url::parse("https://unrelated.microsoft.com/").unwrap()));
+            assert!(!switched.trusted(&Url::parse("https://unrelated.cloud.microsoft/").unwrap()));
+            let service_url = Url::parse(&switched.teams_url).unwrap();
+            let child = Url::parse(&format!(
+                "https://unconfigured.{}/",
+                service_url.host_str().unwrap()
+            ))
+            .unwrap();
+            assert!(!switched.trusted(&child));
+        }
+    }
+
+    #[test]
+    fn builtin_icon_decoder_rejects_malformed_and_wrong_size_assets() {
+        assert!(icon_image(b"not a PNG").is_err());
+        assert!(icon_image(include_bytes!("../icons/generator/icon.png")).is_err());
+        assert!(icon_image(include_bytes!("../../dist/generator.png")).is_ok());
+    }
+
+    #[test]
+    fn switching_service_keeps_organization_auth_and_assigns_isolated_identity() {
+        let teams = AppConfig::parse(br#"{"trusted_auth_hosts":["login.example.com"],"session_cookie_hosts":["login.example.com","teams.cloud.microsoft"],"native_foreground":true}"#).unwrap();
+        let outlook = teams.clone().for_application(Application::Outlook).unwrap();
+        assert_eq!(outlook.name, "Microsoft Outlook");
+        assert!(outlook.cookie_host_allowed("login.example.com"));
+        assert!(outlook.cookie_host_allowed("outlook.office.com"));
+        assert!(!outlook.cookie_host_allowed("teams.cloud.microsoft"));
+        assert_eq!(outlook.trusted_auth_hosts, teams.trusted_auth_hosts);
+        assert!(!outlook.native_foreground);
+        let generated = outlook.clone().export_identity(None);
+        assert!(generated
+            .identifier()
+            .starts_with("org.9h41.outlook.generated."));
+        assert_ne!(generated.profile_id, teams.export_identity(None).profile_id);
+        let update = outlook.clone().export_identity(Some(&generated));
+        assert_eq!(update.profile_id, generated.profile_id);
+        let bytes = serde_json::to_vec(&generated).unwrap();
+        let loaded = AppConfig::parse(&bytes).unwrap();
+        assert_eq!(loaded.teams_url, outlook.teams_url);
+        let back = outlook.for_application(Application::Teams).unwrap();
+        assert_eq!(back.teams_url, AppConfig::default().teams_url);
+        assert!(back.cookie_host_allowed("login.example.com"));
+    }
+
     #[test]
     fn runtime_identity_must_match_bundle_and_output_cannot_be_inside_checkout() {
         assert!(AppConfig::default()

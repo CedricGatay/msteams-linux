@@ -13,7 +13,7 @@ python3 - "$ROOT" "$PROFILE" <<'PY'
 import pathlib,subprocess,sys
 parent=pathlib.Path(sys.argv[1])/'src-tauri/target'/sys.argv[2]/'bundle/macos'
 commands=subprocess.check_output(['ps','-axo','command='],text=True).splitlines()
-for name in ['Microsoft Teams.app','Teams Configurator.app']:
+for name in ['Microsoft Teams.app','Microsoft Cloud App Generator.app']:
  if any(line.strip().startswith(str(parent/name)+'/Contents/MacOS/') for line in commands):
   raise SystemExit('Quit the build-output app before rebuilding it')
 PY
@@ -32,7 +32,7 @@ import json,pathlib,plistlib,shutil,subprocess,sys
 root=pathlib.Path(sys.argv[1]); profile=sys.argv[2]; signer=sys.argv[3]
 distribution=json.loads((root/'config/distribution.json').read_text())
 parent=root/'src-tauri/target'/profile/'bundle/macos'
-runtime=parent/'Microsoft Teams.app'; output=parent/'Teams Configurator.app'
+runtime=parent/'Microsoft Teams.app'; output=parent/'Microsoft Cloud App Generator.app'
 if (runtime/'Contents/Resources/runtime-config.json').exists():
  raise SystemExit('Refusing to package a personalized runtime as a public template')
 commands=subprocess.check_output(['ps','-axo','command='],text=True).splitlines()
@@ -44,7 +44,11 @@ resources=output/'Contents/Resources'; resources.mkdir(exist_ok=True)
 shutil.copytree(runtime,resources/'RuntimeTemplate.app')
 (resources/'configurator-mode.json').write_text(json.dumps({'mode':'configurator','version':1})+'\n')
 path=output/'Contents/Info.plist'
-info=plistlib.loads(path.read_bytes());info.update(CFBundleName='Teams Configurator',CFBundleDisplayName='Teams Configurator',CFBundleIdentifier=distribution['configurator_identifier'])
+info=plistlib.loads(path.read_bytes());info.update(CFBundleName='Microsoft Cloud App Generator',CFBundleDisplayName='Microsoft Cloud App Generator',CFBundleIdentifier=distribution['configurator_identifier'],CFBundleIconFile='generator.icns')
+# Customize only the outer generator; the sealed runtime template keeps its own icon.
+shutil.copyfile(root/'src-tauri/icons/generator/icon.icns',resources/'generator.icns')
+info.pop('CFBundleIconName',None)
+info.pop('CFBundleIcons',None)
 path.write_bytes(plistlib.dumps(info))
 timestamp='--timestamp=none' if signer == '-' else '--timestamp'
 subprocess.run(['/usr/bin/codesign','--force','--sign',signer,'--identifier',info['CFBundleIdentifier'],'--options','runtime',timestamp,'--entitlements',str(root/'src-tauri/Entitlements.plist'),str(output)],check=True)

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "application": "powerpoint",
+  "name": "Microsoft PowerPoint",
+  "teams_url": "https://powerpoint.cloud.microsoft/",
+  "notification_origins": ["https://powerpoint.cloud.microsoft", "https://powerpoint.officeapps.live.com"],
+  "session_cookie_hosts": ["login.microsoftonline.com", "login.live.com", "powerpoint.cloud.microsoft", "powerpoint.officeapps.live.com"],
+  "native_foreground": false
+}

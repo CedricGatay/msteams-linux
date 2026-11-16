@@ -178,6 +178,12 @@ fn export_with_signer(
         );
     }
     let existing = existing_identity(&destination)?;
+    if existing
+        .as_ref()
+        .is_some_and(|old| old.application != config.application)
+    {
+        return Err("Cannot change an existing app's service; choose a different output to keep profiles separate".into());
+    }
     let mut config = config.export_identity(existing.as_ref());
     config.validate()?;
     let parent = destination.parent().ok_or("Invalid output directory")?;
@@ -221,16 +227,24 @@ fn export_with_signer(
             "CFBundleIdentifier".into(),
             plist::Value::String(config.identifier().into()),
         );
+        // Use a fixed resource name, not caller/template-controlled paths. Both
+        // exports and updates replace it before signing, so Finder, Dock and
+        // native notification identity use the selected service's artwork.
+        std::fs::write(
+            resources.join("application.icns"),
+            config.application.icon_icns(),
+        )
+        .map_err(|_| "Cannot write application icon")?;
+        info.insert("CFBundleIconFile".into(), "application.icns".into());
+        info.remove("CFBundleIconName");
+        info.remove("CFBundleIcons");
         info.insert(
             "NSCameraUsageDescription".into(),
-            plist::Value::String(format!("{} uses your camera for Teams calls.", config.name)),
+            plist::Value::String(format!("{} uses your camera for calls.", config.name)),
         );
         info.insert(
             "NSMicrophoneUsageDescription".into(),
-            plist::Value::String(format!(
-                "{} uses your microphone for Teams calls.",
-                config.name
-            )),
+            plist::Value::String(format!("{} uses your microphone for calls.", config.name)),
         );
         plist::Value::Dictionary(info)
             .to_file_xml(&info_path)
@@ -317,6 +331,104 @@ mod tests {
             .exists());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn exports_outlook_alongside_teams_and_refuses_cross_service_updates() {
+        let (root, template) = fixtures();
+        let teams_path = root.join("Teams.app");
+        let outlook_path = root.join("Outlook.app");
+        let teams = export_with_signer(AppConfig::default(), &template, &teams_path, |_, _, _| {
+            Ok(())
+        })
+        .unwrap();
+        let outlook = AppConfig::parse(br#"{"application":"outlook"}"#).unwrap();
+        let mail = export_with_signer(outlook.clone(), &template, &outlook_path, |_, _, _| Ok(()))
+            .unwrap();
+        assert_ne!(mail.identifier, teams.identifier);
+        assert_ne!(mail.profile_id, teams.profile_id);
+        assert!(mail.identifier.starts_with("org.9h41.outlook.generated."));
+        let updated =
+            export_with_signer(outlook.clone(), &template, &outlook_path, |_, _, _| Ok(()))
+                .unwrap();
+        assert_eq!(mail.identifier, updated.identifier);
+        assert_eq!(mail.profile_id, updated.profile_id);
+        let original =
+            std::fs::read(teams_path.join("Contents/Resources").join(CONFIG_RESOURCE)).unwrap();
+        assert!(
+            export_with_signer(outlook, &template, &teams_path, |_, _, _| panic!(
+                "must reject before signing"
+            ))
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(teams_path.join("Contents/Resources").join(CONFIG_RESOURCE)).unwrap(),
+            original
+        );
+        let info = dictionary(&outlook_path.join("Contents/Info.plist")).unwrap();
+        assert_eq!(
+            info.get("CFBundleIconFile")
+                .and_then(plist::Value::as_string),
+            Some("application.icns")
+        );
+        assert_eq!(
+            std::fs::read(outlook_path.join("Contents/Resources/application.icns")).unwrap(),
+            configuration::Application::Outlook.icon_icns()
+        );
+        assert_eq!(
+            std::fs::read(teams_path.join("Contents/Resources/application.icns")).unwrap(),
+            AppConfig::default().application.icon_icns()
+        );
+        let embedded = AppConfig::read(
+            &outlook_path
+                .join("Contents/Resources")
+                .join(CONFIG_RESOURCE),
+        )
+        .unwrap();
+        assert_eq!(embedded.teams_url, "https://outlook.office.com/mail/");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn each_service_exports_its_own_signed_icon_and_cannot_replace_another_service() {
+        use configuration::Application;
+        let (root, template) = fixtures();
+        let services = [
+            Application::Teams,
+            Application::Outlook,
+            Application::Word,
+            Application::Excel,
+            Application::Powerpoint,
+        ];
+        for application in services {
+            let config = AppConfig::default().for_application(application).unwrap();
+            let target = root.join(format!("{}.app", application.label()));
+            let exported =
+                export_with_signer(config.clone(), &template, &target, |staged, _, _| {
+                    assert_eq!(
+                        std::fs::read(staged.join("Contents/Resources/application.icns")).unwrap(),
+                        application.icon_icns()
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let updated = export_with_signer(config, &template, &target, |_, _, _| Ok(())).unwrap();
+            assert_eq!(exported.identifier, updated.identifier);
+            assert_eq!(exported.profile_id, updated.profile_id);
+            for other in services {
+                if other == application {
+                    continue;
+                }
+                assert!(export_with_signer(
+                    AppConfig::default().for_application(other).unwrap(),
+                    &template,
+                    &target,
+                    |_, _, _| panic!("must reject before signing")
+                )
+                .is_err());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn refuses_unrelated_existing_apps_and_symlinked_templates() {
         let (root, template) = fixtures();

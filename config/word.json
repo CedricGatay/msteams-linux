@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "application": "word",
+  "name": "Microsoft Word",
+  "teams_url": "https://word.cloud.microsoft/",
+  "notification_origins": ["https://word.cloud.microsoft", "https://word-edit.officeapps.live.com"],
+  "session_cookie_hosts": ["login.microsoftonline.com", "login.live.com", "word.cloud.microsoft", "word-edit.officeapps.live.com"],
+  "native_foreground": false
+}

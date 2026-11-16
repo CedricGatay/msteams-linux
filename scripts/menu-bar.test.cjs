@@ -16,7 +16,7 @@ test('commands move to Help and use application-wide dispatch independent of the
   assert.match(tray, /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let tray = tray\.menu\(&menu\)/);
 });
 test('View exposes reload shortcut and a persistent native tray checkbox without page IPC', () => {
-  assert.match(menus, /RELOAD_ID,\s*"Reload Teams",\s*true,\s*Some\("CmdOrCtrl\+R"\)/);
+  assert.match(menus, /RELOAD_ID,\s*format!\([\s\S]*?"Reload \{\}"[\s\S]*?app\.config\(\)\.product_name[\s\S]*?Some\("CmdOrCtrl\+R"\)/);
   assert.match(menus, /CheckMenuItem::with_id/);
   assert.match(menus, /"Show Tray Icon"/);
   assert.match(menus, /tray-visible\.json/);

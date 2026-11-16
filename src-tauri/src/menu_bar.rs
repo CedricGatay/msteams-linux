@@ -122,7 +122,16 @@ pub fn install<R: tauri::Runtime>(
     )?;
     view.append_items(&[
         &PredefinedMenuItem::separator(app)?,
-        &MenuItem::with_id(app, RELOAD_ID, "Reload Teams", true, Some("CmdOrCtrl+R"))?,
+        &MenuItem::with_id(
+            app,
+            RELOAD_ID,
+            format!(
+                "Reload {}",
+                app.config().product_name.as_deref().unwrap_or("App")
+            ),
+            true,
+            Some("CmdOrCtrl+R"),
+        )?,
         &visible,
     ])?;
     Ok(visible)

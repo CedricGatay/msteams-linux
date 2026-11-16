@@ -1,12 +1,12 @@
-# Teams shell and configurator for macOS
+# Microsoft Cloud App Generator for macOS
 
-An unofficial [Tauri v2](https://tauri.app) shell for the Microsoft Teams web
-client, with native notifications, media permissions, tray integration and
+An unofficial [Tauri v2](https://tauri.app) shell for the Microsoft Teams,
+Outlook, Word, Excel and PowerPoint web clients, with native notifications, tray integration and
 optional Keychain-backed session restoration.
 
 **The configurator is the only macOS release download. It creates independent,
-fully bundled Teams `.app` applications from JSON. End users do not need Rust,
-Node, Python or this checkout. No standalone Teams app is distributed.**
+fully bundled Microsoft cloud `.app` applications from JSON. End users do not need Rust,
+Node, Python or this checkout. No standalone runtime app is distributed.**
 
 Not affiliated with or supported by Microsoft. Configuration files choose which
 websites receive native integrations: use only configurations you trust.
@@ -19,27 +19,97 @@ tools. The generated runtime targets the same architecture as the template.
 ```bash
 npm ci
 ./scripts/build-configurator.sh
-open "src-tauri/target/debug/bundle/macos/Teams Configurator.app"
+open "src-tauri/target/debug/bundle/macos/Microsoft Cloud App Generator.app"
 ```
 
 Use `./scripts/build-configurator.sh --release` for a release build. The runtime
 is only a build intermediate: it is copied into the configurator as
 `Contents/Resources/RuntimeTemplate.app`, then the standalone intermediate is
-removed. Generated Teams apps are created exclusively through the configurator.
+removed. Generated apps are created exclusively through the configurator.
 
 For the signed/notarized release, follow [the distribution workflow](docs/apple-distribution.md).
-Its managed output directory contains only `Teams Configurator.zip`, `SHA256SUMS`
+Its managed output directory contains only `Microsoft Cloud App Generator.zip`, `SHA256SUMS`
 and `release.json`; the manifest records the source commit and architecture.
 
 The configurator opens the native **Open configuration file** panel immediately.
-Cancelling leaves a usable screen with a retry button. Select a valid file, enter
-an app display name, choose **Create app**, and select an output location such as
+Cancelling leaves a usable screen with a retry button. Select a valid file, choose
+a service using its icon or the **Application** dropdown, enter an app display name, choose
+**Create app**, and select an output location such as
 `~/Applications`. **Personal configurations and generated apps must be outside
 this checkout.** The exporter rejects destinations inside it.
 
 The resulting app contains its own executable, assets, metadata and embedded
 settings. It runs without the configurator installed. **Open generated app**
 launches the completed bundle through Launch Services.
+
+### Generate Outlook alongside Teams
+
+Open your existing Teams JSON, select **Microsoft Outlook**, and give it a distinct
+name (for example, `Outlook Work`). Create it at a different output path from your
+Teams app. You can then switch back to Teams and create or update that app from the
+same configuration. Custom sign-in hosts and organization session-cookie hosts are
+preserved when switching; the landing page, notification origins and standard
+service-cookie hosts change to the selected application defaults. Switching keeps
+existing navigation restrictions and adds only the target's required exact HTTPS
+hosts; it does not restore the broad built-in navigation suffix allowlist.
+
+Alternatively, open `config/outlook.json` or use a minimal external JSON:
+
+```json
+{"application": "outlook", "name": "Outlook Work"}
+```
+
+Outlook defaults to `https://outlook.office.com/mail/` (Microsoft 365). For a
+personal account, set `teams_url` to `https://outlook.live.com/mail/` instead.
+The legacy `teams_url` field is also used for Outlook to keep existing files
+compatible. Explicit JSON URL/origin overrides are honored when exporting the
+same application type; switching types selects the target's standard URLs.
+
+Each app has its own identity, WebKit profile, storage and Keychain namespace;
+sign in separately. Updating the same application's output preserves its identity.
+The exporter refuses to replace an app with a different service.
+Generated apps use their service's artwork in Finder, the Dock, native notifications
+and the menu-bar icon. Update an existing app at the same output path to
+receive the icon and runtime changes without changing its profile. Quit it first.
+The generator has its own cloud-to-apps icon (not a Microsoft service logo),
+also displayed in its configuration screen. Its bundle identifier remains unchanged.
+The original artwork and regeneration instructions are in
+[`src-tauri/icons/generator/README.md`](src-tauri/icons/generator/README.md).
+
+Shared runtime features include navigation, authentication popups, file drops,
+zoom, session restoration and the standard web-notification bridge. Teams-specific
+foreground notifications, presence adaptation and automatic media prompts are
+only enabled in Teams. Non-Teams services' `navigator.setAppBadge`/`clearAppBadge` calls
+set the unread badge; if unused, a leading `(N)` or `(N+)` title count is the fallback.
+Mail notifications are not counted as unread messages. Focusing Outlook does not
+clear a reported unread count. Zero clears the badge; both tray and Dock display
+`99+` above 99. Without a Badge API call or title count from Outlook, the shell
+cannot determine mailbox unread counts and does not scrape mail content.
+Outlook notification delivery depends on the web client's
+WebKit support and notification settings; service-worker-only/background delivery
+is not guaranteed. Live Outlook sign-in and notification behavior need verification
+with your account.
+
+### Word, Excel and PowerPoint
+
+Choose **Word**, **Excel** or **PowerPoint** using its icon. You can reuse the same
+trusted organization JSON and create each app at a separate output path. The
+service picker keeps custom names; built-in names change to match the service.
+For service-specific files, use `config/word.json`, `config/excel.json` or
+`config/powerpoint.json`, or a minimal external JSON such as:
+
+```json
+{"application": "word", "name": "Word Work"}
+```
+
+Defaults open `https://word.cloud.microsoft/`, `https://excel.cloud.microsoft/`
+and `https://powerpoint.cloud.microsoft/`. These are **web applications**, not
+bundled native Office editors: their features, subscriptions, connectivity and
+WebKit compatibility depend on Microsoft. Office document popups use the app's
+isolated profile and remain open when you return to its main window. Native IPC
+stays restricted to the configured origins in the main window, not document popups.
+Test real sign-in, document opening/editing and saving with your account before
+relying on them for work. No live document/account test is performed automatically.
 
 ## Configuration
 
@@ -69,8 +139,9 @@ A minimal external file can override only what is needed:
 | Field | Meaning |
 |---|---|
 | `version` | Schema version, currently `1`. |
+| `application` | `"teams"` (default for existing files), `"outlook"`, `"word"`, `"excel"` or `"powerpoint"`; selects service defaults. |
 | `name` | Display name, without paths or `.app` suffix. Editable in the UI. |
-| `teams_url` | Trusted HTTPS landing page, without credentials, query or fragment. |
+| `teams_url` | Trusted HTTPS landing page for the selected application, without credentials, query or fragment. |
 | `user_agent` | `"auto"` (default): Safari/WebKit identification on macOS, desktop Chrome on other platforms. An explicit string overrides it. |
 | `trusted_host_suffixes` | Navigation suffix allowlist; generic Microsoft defaults apply when omitted. |
 | `trusted_auth_hosts` | Additional **exact HTTPS hosts**, not wildcard parent domains. |
@@ -88,7 +159,7 @@ automatically grant IPC access to authentication pages.
 `identifier`, `profile_id` and `generated` are embedded runtime metadata. New
 exports always assign fresh identities, regardless of identity values in an
 input file. When updating a previously generated app, the output app's existing
-bundle ID/profile UUID are retained. The exporter refuses unrelated apps,
+bundle ID/profile UUID are retained. The exporter refuses cross-application updates, unrelated apps,
 running generated apps and symlinked templates/targets. It stages, signs and
 verifies before replacement; a signing failure leaves the existing app intact.
 Quit a generated app before updating it. To receive runtime features such as
@@ -121,7 +192,7 @@ packaged configurator uses a role marker, so no command-line option is needed.
 
 Bundles use the `org.9h41` namespace: `org.9h41.teams` for the runtime,
 `org.9h41.teams.configurator` for the configurator, and isolated generated IDs
-under `org.9h41.teams.generated`. Renaming creates a new macOS profile/permission
+under `org.9h41.<service>.generated` (for example `org.9h41.word.generated`). Changing identifiers creates a new macOS profile/permission
 namespace; old authentication is not silently copied.
 
 Local bundles are ad-hoc signed with matching `CFBundleIdentifier` and sealed

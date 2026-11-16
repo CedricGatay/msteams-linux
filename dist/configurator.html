@@ -2,26 +2,47 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Teams Configurator</title>
+  <title>Microsoft Cloud App Generator</title>
   <style>
     :root { color-scheme: light dark; font: 15px system-ui, -apple-system, sans-serif; }
     body { margin: 0; padding: 2rem; background: #1f1f1f; color: #eee; }
     main { max-width: 40rem; margin: auto; } p { line-height: 1.6; color: #ccc; }
-    h1 { margin-top: 0; } label { display: block; margin: 1.5rem 0 .4rem; }
-    input { box-sizing: border-box; padding: .7rem; width: 100%; font: inherit; border: 1px solid #888; border-radius: .4rem; }
+    header { display: flex; align-items: center; gap: .8rem; margin-bottom: 1rem; }
+    header img { width: 64px; height: 64px; flex-shrink: 0; }
+    h1 { margin: 0; font-size: 1.65rem; } label { display: block; margin: 1.5rem 0 .4rem; }
+    input, select { box-sizing: border-box; padding: .7rem; width: 100%; font: inherit; border: 1px solid #888; border-radius: .4rem; }
     button { font: inherit; padding: .7rem 1rem; border: 0; border-radius: .4rem; margin: .5rem .3rem .5rem 0; cursor: pointer; }
     .primary { background: #6264a7; color: white; } button:disabled { opacity: .45; cursor: default; }
+    .services { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .5rem; margin-top: 1rem; }
+    .service { display: flex; flex-direction: column; align-items: center; gap: .4rem; margin: 0; padding: .6rem .2rem; background: #303030; color: inherit; border: 2px solid transparent; font-size: .85rem; }
+    .service img { width: 48px; height: 48px; object-fit: contain; }
+    .service[aria-pressed="true"] { border-color: #b6b8ff; background: #3a3b59; }
+    .service:focus-visible { outline: 2px solid white; outline-offset: 2px; }
+    @media (max-width: 520px) { .services { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     #summary, #result { white-space: pre-wrap; overflow-wrap: anywhere; color: #ccc; }
     #status { min-height: 3rem; padding: .8rem 0; } .error { color: #ffb4ab; }
     small { display: block; color: #aaa; line-height: 1.6; margin-top: 1rem; }
   </style>
 </head>
 <body><main>
-  <h1>Teams Configurator</h1>
-  <p>Open a trusted JSON configuration, then create an independent macOS application.
+  <header><img src="generator.png" alt="" /><h1>Microsoft Cloud App Generator</h1></header>
+  <p>Create independent Teams, Outlook, Word, Excel and PowerPoint macOS applications from a trusted JSON configuration.
     No Rust installation is needed. Your sign-in and Keychain data are never copied.</p>
   <button id="open">Open configuration file…</button>
   <p id="summary">No configuration selected.</p>
+  <div class="services" role="group" aria-label="Choose a Microsoft service">
+    <button class="service" type="button" data-application="teams" aria-pressed="false" disabled><img src="services/teams.png" alt="" />Teams</button>
+    <button class="service" type="button" data-application="outlook" aria-pressed="false" disabled><img src="services/outlook.png" alt="" />Outlook</button>
+    <button class="service" type="button" data-application="word" aria-pressed="false" disabled><img src="services/word.png" alt="" />Word</button>
+    <button class="service" type="button" data-application="excel" aria-pressed="false" disabled><img src="services/excel.png" alt="" />Excel</button>
+    <button class="service" type="button" data-application="powerpoint" aria-pressed="false" disabled><img src="services/powerpoint.png" alt="" />PowerPoint</button>
+  </div>
+  <label for="application">Application</label>
+  <select id="application">
+    <option value="teams">Microsoft Teams</option><option value="outlook">Microsoft Outlook</option>
+    <option value="word">Microsoft Word</option><option value="excel">Microsoft Excel</option>
+    <option value="powerpoint">Microsoft PowerPoint</option>
+  </select>
   <label for="name">Application name</label><input id="name" maxlength="80" autocomplete="off" placeholder="Teams Example" />
   <button id="export" class="primary" disabled>Create app…</button>
   <button id="launch" disabled>Open generated app</button>

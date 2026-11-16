@@ -63,7 +63,7 @@ def notarize(app, profile, work):
 
 def publish_release(app, settings, request_id, commit, architecture, output):
     """Atomically replace the managed release directory with configurator only."""
-    if app.name != 'Teams Configurator.app':
+    if app.name != 'Microsoft Cloud App Generator.app':
         raise ValueError('Only the configurator is a public distribution artifact')
     if output.is_symlink() or output.exists() and not output.is_dir():
         raise ValueError('Refusing to replace a non-directory distribution path')
@@ -126,7 +126,7 @@ def main():
             raise ValueError('Commit source changes before building a distribution release')
         subprocess.run([str(ROOT / 'scripts/build-configurator.sh'), '--release'], env=environment, check=True)
         base = ROOT / 'src-tauri/target/release/bundle/macos'
-        configurator = base / 'Teams Configurator.app'
+        configurator = base / 'Microsoft Cloud App Generator.app'
         template = configurator / 'Contents/Resources/RuntimeTemplate.app'
         verify_bundle(template, settings['runtime_identifier'], settings['team_id'])
         verify_bundle(configurator, settings['configurator_identifier'], settings['team_id'])

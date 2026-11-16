@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "application": "excel",
+  "name": "Microsoft Excel",
+  "teams_url": "https://excel.cloud.microsoft/",
+  "notification_origins": ["https://excel.cloud.microsoft", "https://excel.officeapps.live.com"],
+  "session_cookie_hosts": ["login.microsoftonline.com", "login.live.com", "excel.cloud.microsoft", "excel.officeapps.live.com"],
+  "native_foreground": false
+}

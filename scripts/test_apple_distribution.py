@@ -58,7 +58,7 @@ class SigningPolicyTests(unittest.TestCase):
 
 class ConfiguratorReleaseTests(unittest.TestCase):
     def app(self, root):
-        app = root / 'Teams Configurator.app'
+        app = root / 'Microsoft Cloud App Generator.app'
         (app / 'Contents').mkdir(parents=True)
         (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleShortVersionString': '1.0.0'}))
         return app
@@ -66,7 +66,7 @@ class ConfiguratorReleaseTests(unittest.TestCase):
     @staticmethod
     def fake_ditto(command, **_kwargs):
         with zipfile.ZipFile(command[-1], 'w') as archive:
-            archive.writestr('Teams Configurator.app/Contents/Info.plist', b'synthetic bundle')
+            archive.writestr('Microsoft Cloud App Generator.app/Contents/Info.plist', b'synthetic bundle')
 
     def test_only_configurator_archive_and_matching_manifest_replace_old_release(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -78,8 +78,8 @@ class ConfiguratorReleaseTests(unittest.TestCase):
             (output / 'release.json').write_text('{}')
             with mock.patch.object(notarize.subprocess, 'run', side_effect=self.fake_ditto):
                 archive = notarize.publish_release(app, {'team_id': 'ABCDEFGHIJ'}, 'synthetic-id', 'a' * 40, 'arm64', output)
-            self.assertEqual(archive.name, 'Teams Configurator.zip')
-            self.assertEqual({p.name for p in output.iterdir()}, {'Teams Configurator.zip', 'SHA256SUMS', 'release.json'})
+            self.assertEqual(archive.name, 'Microsoft Cloud App Generator.zip')
+            self.assertEqual({p.name for p in output.iterdir()}, {'Microsoft Cloud App Generator.zip', 'SHA256SUMS', 'release.json'})
             manifest = json.loads((output / 'release.json').read_text())
             self.assertEqual(manifest['distribution'], 'configurator-only')
             self.assertEqual(manifest['commit'], 'a' * 40)
