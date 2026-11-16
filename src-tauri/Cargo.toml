@@ -1,6 +1,6 @@
 [package]
 name = "msteams-tauri"
-version = "1.0.1"
+version = "1.1.0"
 description = "Unofficial Microsoft Teams desktop wrapper built with Tauri"
 authors = ["msteams-tauri contributors"]
 edition = "2021"
